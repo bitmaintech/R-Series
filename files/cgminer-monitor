@@ -1,0 +1,50 @@
+#!/bin/sh
+# This file is for cron job
+
+# This if for make sure the start cgminer when there is network problem
+set -x
+date
+cpuinfo=`top -bn 1 | grep hostapd | grep -v "grep" | awk '{print $7}'| tr -d '%'`
+echo $cpuifo
+
+if [ "$cpuinfo" -gt "80" ]; then
+    wifi down
+    wifi up
+fi
+C=`pidof cgminer | wc -w`
+if [ "$C" != "1" ]; then
+    echo "Case C"
+    killall -s 9 cgminer
+    sleep 1
+    /etc/init.d/cgminer restart
+    exit 0;
+fi
+E=`pidof cgminer-u3 | wc -w`
+if [ "$E" != "1" ]; then
+    echo "Case E"
+    killall -s 9 cgminer-u3
+    sleep 1
+    /etc/init.d/cgminer-u3 restart
+    exit 0;
+fi
+
+A=`cat /tmp/cm.log`
+B=`cgminer-api devs | grep "^   \[Last Valid Work\]"`
+echo "$B" > /tmp/cm.log
+if [ "$B" != "" -a "$A" == "$B" ]; then
+    echo "Case B"
+    killall -s 9 cgminer
+    sleep 1
+    /etc/init.d/cgminer restart
+    exit 0;
+fi
+
+D=`cgminer-api stats | grep "^   \[miner_count\]"`
+if [ "$D" == "" ]; then
+	echo "Case D"
+	killall -s 9 cgminer
+	sleep 1
+	/etc/init.d/cgminer restart
+	exit 0;
+fi
+

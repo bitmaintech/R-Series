@@ -1,0 +1,162 @@
+#!/bin/sh /etc/rc.common
+set -x
+START=99
+
+APP=cgminer
+PID_FILE=/var/run/$APP.pid
+
+
+start() {
+	echo sf reset begin...
+	echo 27 > /sys/class/gpio/export
+	echo out > /sys/class/gpio/gpio27/direction
+	echo 0 > /sys/class/gpio/gpio27/value
+	sleep 1
+	echo 1 > /sys/class/gpio/gpio27/value
+	echo sf reset over
+	ps |grep -v grep|grep udevd  > /dev/null
+
+    if [ $? -eq 0 ]
+    then
+        echo  /sbin/udevd is running
+    else
+       /sbin/udevd --daemon
+       echo start /sbin/udevd
+    fi
+	local _pool1url=solo.antpool.com:25
+	local _pool1user
+	local _pool1pw=123
+
+	local _freq
+	config_load cgminer
+
+	config_get _aa default api_allow
+
+	config_get _freq default freq
+	config_get _vl default voltage
+
+	config_get _pooluser default pooluser
+	config_get _cgctrl default cgctrl
+	if [ -z "$_pooluser" ]; then
+		_pooluser=user
+	fi
+	if [ -z "$_cgctrl" ]; then
+		_cgctrl=en
+	fi
+	echo $_pooluser
+	echo $_cgctrl
+
+	temp_file="/tmp/temp_usr.txt"
+	user_mtd=/dev/mtdblock6
+	magic_str=`hexdump -v -n 3 -e '1/1 "%02x"' $user_mtd`
+	magic=${magic_str:0:2}
+	usr_file="/etc/config/cgminer"
+	if [ $magic != "97" ]; then
+		echo "no fl user name"
+		user_pos=3;
+
+		echo -n -e "\x97" > $temp_file
+                dd if=$temp_file of=$user_mtd bs=1 count=1 seek=0
+
+              	hex_data_str=`echo -n "$user_pos"| awk '{printf("%04x",$1)}'`
+              	hex_data=`echo -n ${hex_data_str:0:2}`
+              	echo -n -e "\x$hex_data" > $temp_file
+              	hex_data=`echo -n ${hex_data_str:2:2}`
+              	echo -n -e "\x$hex_data" >> $temp_file
+                dd if=$temp_file of=$user_mtd bs=1 count=2 seek=1
+
+		echo $_pooluser > $temp_file
+                echo $_cgctrl >> $temp_file
+		str_len=`cat $temp_file  | wc -c`
+                dd if=$temp_file of=$user_mtd bs=1 count=$str_len seek=$user_pos
+	else
+		user_pos=${magic_str:2:4}
+		let user_pos=0x$user_pos
+		user_pos=`echo $user_pos`
+		dd of=$temp_file if=$user_mtd bs=1 count=20 skip=$user_pos
+	fi
+
+	fl_user=`sed -n '1p' $temp_file`
+        echo $fl_user
+        fl_cg_ctrl=`sed -n '2p' $temp_file`
+	if [ "$fl_user" != "$_pooluser" -o "$_cgctrl" != "$fl_cg_ctrl" ]; then
+		if [ $_pooluser == "user" -a $_cgctrl == "en" ]; then
+			sed -i "s#'${_pooluser}'#'${fl_user}'#g" $usr_file
+			sed -i "s#${_cgctrl}#${fl_cg_ctrl}#g" $usr_file
+			_pooluser=$fl_user
+			_cgctrl=$fl_cg_ctrl
+			echo "fl_user repalce config user"
+		else
+			echo "repalce fl user"
+			usr_config_size=1024;
+			fl_user_len=`echo $fl_user | wc -c`
+			fl_cg_ctrl_len=`echo $fl_cg_ctrl | wc -c`
+			user_pos=$(($user_pos+$fl_user_len+$fl_cg_ctrl_len))
+			if [ `test $user_pos -ge $usr_config_size` ]; then
+				user_pos=3
+			fi
+                	hex_data_str=`echo -n "$user_pos"| awk '{printf("%04x",$1)}'`
+                	hex_data=`echo -n ${hex_data_str:0:2}`
+                	echo -n -e "\x$hex_data" > $temp_file
+                	hex_data=`echo -n ${hex_data_str:2:2}`
+                	echo -n -e "\x$hex_data" >> $temp_file
+                	hexdump $temp_file
+                	dd if=$temp_file of=$user_mtd bs=1 count=2 seek=1
+			echo $_pooluser > $temp_file
+			echo $_cgctrl >> $temp_file
+			str_len=`cat $temp_file  | wc -c`
+			dd if=$temp_file of=$user_mtd bs=1 count=$str_len seek=$user_pos
+		fi
+		echo $_pooluser
+		echo $_cgctrl
+	fi
+	_mac=`/sbin/ifconfig eth1  | sed -n '/HWaddr/ s/^.*HWaddr *//pg'`
+	_pool1user="_R1_lottery_"${_pooluser}"_"${_mac}
+	#if [ "$_pool1url" != "" -a "$_pool1user" != "" -a "$_pool1pw" != "" ]; then
+	if [ "$_pool1url" != "" -a "$_pool1user" != "" -a "$_pool1pw" != "" ]; then
+	    #POOL1="-o $_pool1url -O $_pool1user:$_pool1pw"
+	    POOL1="-o $_pool1url -u $_pool1user"
+	fi
+
+	if [ "$_vl" = "" ]; then
+		_vl="0725"
+	fi
+    #TO=$(( 12690 / $_cf ))
+	#_cf = 25 *((($_regv >> 7)&0x7f) + 1)/(((($_regv >> 2) & 0x1f) + 1) * (0x1 << (&_regv & 0x3)))
+	#AOPTIONS=" --icarus-timing 2 -G -D"
+	#AOPTIONS="--bitmain-options 115200:32:8:$_freq"
+	AOPTIONS="--antrouter-options 115200:$_freq"
+	#PARAMS=" --lowmem $AOPTIONS $POOL1 $POOL2 $POOL3 $_pb --api-allow $_aa --api-listen"
+	#PARAMS="-D $AOPTIONS $POOL1 $POOL2 $POOL3 $_pb $_ow $_bec --api-listen --api-network"
+	PARAMS="--bmsc-options 115200:0.7 --bmsc-freq 0782  -o stratum.antpool.com:3333 -u antminer_1 --api-listen --api-network --version-file /usr/bin/compile_time --queue 4096"
+	$APP --lowmem --antrouter-options 115200:7:100:0783 -q >/dev/null 2>&1
+
+	sleep 1
+	#when ntpd fail	can delet #
+	touch /tmp/cgminer-ntpd-done
+	cnt=0
+	if [ ! -f /tmp/cgminer-ntpd-done ]; then
+		while [ "$NTPD_RET" != "0" ]; do
+			ntpd -d -n -q -N \
+			    -p 0.openwrt.pool.ntp.org \
+			    -p 1.openwrt.pool.ntp.org \
+			    -p 2.openwrt.pool.ntp.org \
+			    -p 3.openwrt.pool.ntp.org
+				cnt=$(($cnt+1))
+				if [ $cnt -gt 0 ];then
+					echo cnt
+					break
+				fi
+			NTPD_RET=$?
+		done
+
+		touch /tmp/cgminer-ntpd-done
+	fi
+	echo $PARAMS
+	start-stop-daemon -S -x $APP -p $PID_FILE -m -b -- $PARAMS
+	#start-stop-daemon -S -x $APP -p $PID_FILE -m -- $PARAMS
+}
+
+stop() {
+	start-stop-daemon -K -n $APP -p $PID_FILE -s TERM
+}

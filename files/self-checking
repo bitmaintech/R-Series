@@ -1,0 +1,54 @@
+#!/bin/sh
+	#check asic
+	mv /usr/bin/cgminer-monitor /usr/bin/cgminer-monitor.bak
+    /etc/init.d/cgminer restart
+    if [ $? -eq 0 ];then
+    echo "asic test ok"
+    asic="ok"
+    fi
+	mv /usr/bin/cgminer-monitor.bak /usr/bin/cgminer-monitor
+
+	#check wan
+	dmesg | grep 'eth1: link up.*duplex' > /dev/null
+	if [ $? -eq 0 ];then
+		echo wan ok
+		wan="ok"
+	fi
+	#check wifi
+	dmesg | grep 'br-lan: port 2(wlan0)' > /dev/null
+	if [ $? -eq 0 ];then
+		ps | grep -v grep | grep 'hostapd'
+			if [ $? -eq 0 ];then
+				echo wifi ok
+				wifi="ok"
+			fi
+	fi
+		
+	#check usb
+	dmesg | grep 'usb .* USB device number.*ehci-platform' > /dev/null
+	if [ $? -eq 0 ];then
+		echo detect usb-plug ok
+		usb="ok"
+	fi
+	
+	if [ $asic="ok" ] && [ $wan = "ok" ] && [ $wifi = "ok" ] && [ $usb = "ok" ];then
+	    echo result ok
+		result=1
+	else
+		result=0
+	fi
+	
+	i=0
+	k=0
+    while [ $i -lt 100 ]
+    do
+  	  let k=$i%2
+  	  let i+=1
+  	  if [ $k -eq 0 ];then
+		echo 0 > /sys/devices/platform/leds-gpio/leds/tp-link\:green\:wlan/brightness	 
+	  else
+		echo $result > /sys/devices/platform/leds-gpio/leds/tp-link\:green\:wlan/brightness	
+	  fi
+		sleep 1	
+	done
+
