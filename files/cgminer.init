@@ -14,20 +14,6 @@ start() {
         echo 0 > /sys/class/gpio/gpio27/value
         sleep 1
         echo 1 > /sys/class/gpio/gpio27/value
-#	if [ !  -d "/sys/class/gpio/gpio18" ];then
-#		echo 18 > /sys/class/gpio/export
-#	fi
-#        echo out > /sys/class/gpio/gpio18/direction
-#        echo 1 > /sys/class/gpio/gpio18/value
-#        sleep 1
- #	ps | grep -v grep|grep udevd  > /dev/null
-
- #   if [ $? -eq 0 ];then
- #       echo detect hotpluging USB miners
- # else
- #        /sbin/udevd --daemon
- #        echo start detecting
- #   fi
 	local _pool1url=antrouter.antpool.com:3333
 	local _pool1user
 
@@ -40,7 +26,6 @@ start() {
 	config_get _aa default api_allow
 
 	config_get _freq default freq
-	config_get _vl default voltage
 
 	config_get _pooluser default pooluser
 	config_get _cgctrl default cgctrl
@@ -59,16 +44,13 @@ start() {
 	_mac=$(cat /sys/devices/platform/ar933x_wmac/ieee80211/phy0/macaddress | sed 's/://g'| tr -d '\n')
 	version="0"
 	paytype="2"
-	_pool1user=":R1:${version}:${paytype}:"${_pooluser}"_"${_mac}
+	_pool1user=":R2:${version}:${paytype}:"${_pooluser}"_"${_mac}
 	if [ "$_pool1url" != "" -a "$_pool1user" != "" ]; then
 		POOL1="-o $_pool1url -u $_pool1user"
 		POOL2="-o $_pool2url -u $_pool1user"
 		POOL3="-o $_pool3url -u $_pool1user"
 	fi
 
-	if [ "$_vl" = "" ]; then
-		_vl="0725"
-	fi
     #TO=$(( 12690 / $_cf ))
 	#_cf = 25 *((($_regv >> 7)&0x7f) + 1)/(((($_regv >> 2) & 0x1f) + 1) * (0x1 << (&_regv & 0x3)))
 	#AOPTIONS=" --icarus-timing 2 -G -D"
@@ -76,7 +58,7 @@ start() {
 	AOPTIONS="--antrouter-options 115200:$_freq"
 	#PARAMS=" --lowmem $AOPTIONS $POOL1 $POOL2 $POOL3 $_pb --api-allow $_aa --api-listen"
 	#PARAMS="-D $AOPTIONS $POOL1 $POOL2 $POOL3 $_pb $_ow $_bec --api-listen --api-network"
-	PARAMS="$AOPTIONS $POOL1 $POOL2 $POOL3 --api-listen --api-network --version-file /usr/bin/compile_time --queue 10"
+	PARAMS="$AOPTIONS $POOL1 $POOL2 $POOL3 --api-listen --antrouter-vil 1 --api-allow $_aa  --version-file /usr/bin/compile_time --queue 10"
 	$APP --lowmem --bitmain-options 115200:$_freq -q >/dev/null 2>&1
 
 	sleep 1

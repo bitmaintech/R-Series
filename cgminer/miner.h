@@ -464,6 +464,9 @@ struct cgpu_info {
 #endif
 #ifdef USE_ANTROUTER
 	int device_fd;
+	int chip_num;
+	unsigned char tm;
+	pthread_t reg_id,hashrate_id,sendwork_id;
 #endif
 #ifdef USE_BITMAIN
 	int device_fd;
@@ -1083,6 +1086,11 @@ extern bool opt_bmsc_rdworktest;
 #ifdef USE_ANTROUTER
 extern char *opt_antrouter_options;
 extern char *opt_antrouter_volt;
+extern uint8_t multi_mid_nu;
+extern char displayed_hash_rate[16];
+extern double displayed_hash_rate_5s;
+extern double displayed_hash_rate_avg;
+extern int opt_antrouter_vil;
 #endif
 #ifdef USE_MINION
 extern int opt_minion_chipreport;
@@ -1461,7 +1469,10 @@ struct work {
 	struct timeval	tv_cloned;
 	struct timeval	tv_work_start;
 	struct timeval	tv_work_found;
-	char		getwork_mode;
+	char getwork_mode;
+	unsigned char	midstate1[32];
+	unsigned char	midstate2[32];	
+	unsigned char	midstate3[32];
 };
 
 #ifdef USE_MODMINER 

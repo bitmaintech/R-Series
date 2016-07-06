@@ -277,6 +277,11 @@ bool opt_bmsc_rdworktest = false;
 #ifdef USE_ANTROUTER
 char *opt_antrouter_options = NULL;
 char *opt_antrouter_volt = NULL;
+int  opt_antrouter_vil = 0;
+char displayed_hash_rate[16] = {0};
+double displayed_hash_rate_avg = 0;
+double displayed_hash_rate_5s = 0;
+
 #endif
 #ifdef USE_BITMAIN
 char *opt_bitmain_options = NULL;
@@ -789,6 +794,15 @@ static char *set_int_0_to_10(const char *arg, int *i)
 {
 	return set_int_range(arg, i, 0, 10);
 }
+
+#if defined(USE_ANTROUTER) || defined(USE_BMSC)
+static char *set_int_1_to_4(const char *arg, int *i)
+{
+	return set_int_range(arg, i, 1, 4);
+}
+
+#endif
+
 
 static char *set_int_0_to_100(const char *arg, int *i)
 {
@@ -1438,6 +1452,9 @@ static struct opt_table opt_config_table[] = {
  	OPT_WITH_ARG("--antrouter-volt",
    			 set_antrouter_volt, NULL, NULL,
    			 opt_hidden),
+   	OPT_WITH_ARG("--antrouter-vil",
+		     set_int_1_to_4, opt_show_intval,&opt_antrouter_vil,
+		     "VIl mode,set midstate num"),
 #endif
 #ifdef USE_BITMAIN
 	OPT_WITH_ARG("--bitmain-dev",
@@ -2144,6 +2161,8 @@ static struct work *make_work(void)
 		quit(1, "Failed to calloc work in make_work");
 
 	work->id = total_work_inc();
+	if(opt_antrouter_vil)
+			work->id *= multi_mid_nu;
 
 	return work;
 }

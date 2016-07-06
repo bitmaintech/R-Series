@@ -2673,9 +2673,14 @@ static void summary(struct io_data *io_data, __maybe_unused SOCKETTYPE c, __mayb
 	ghs = total_mhashes_done / 1000 / total_secs;
 	work_utility = total_diff1 / ( total_secs ? total_secs : 1 ) * 60;
 
-	root = api_add_elapsed(root, "Elapsed", &(total_secs), true);
-	root = api_add_mhs(root, "GHS 5s", &(g_displayed_rolling), false);
-	root = api_add_mhs(root, "GHS av", &(ghs), false);
+	root = api_add_elapsed(root, "Elapsed", &(total_secs), true);	
+	if(opt_antrouter_vil){
+		root = api_add_mhs(root, "GHS 5s", &(displayed_hash_rate_5s), false);
+		root = api_add_mhs(root, "GHS av", &(displayed_hash_rate_avg), false);
+	}else{
+		root = api_add_mhs(root, "GHS 5s", &(g_displayed_rolling), false);
+		root = api_add_mhs(root, "GHS av", &(ghs), false);
+	}
 	root = api_add_uint(root, "Found Blocks", &(found_blocks), true);
 	root = api_add_int64(root, "Getworks", &(total_getworks), true);
 	root = api_add_int64(root, "Accepted", &(total_accepted), true);
@@ -3355,16 +3360,21 @@ static int itemstats(struct io_data *io_data, int i, char *id, struct cgminer_st
 
 	//add by xjl
 #ifdef USE_ANTROUTER
-	char displayed_hashes[16], displayed_rolling[16];
-	uint64_t d64;
-	
-	d64 = (double)cgpu->total_mhashes / dev_runtime * 1000000ull;
-	suffix_string(d64, displayed_hashes, sizeof(displayed_hashes), 4);
-	d64 = (double)cgpu->rolling * 1000000ull;
-	suffix_string(d64, displayed_rolling, sizeof(displayed_rolling), 4);
-	root = api_add_string(root, "GHS 5s", displayed_rolling, false);
-	root = api_add_string(root, "GHS av", displayed_hashes, false);
 
+		char displayed_hashes[16], displayed_rolling[16];
+		uint64_t d64;
+		
+		d64 = (double)cgpu->total_mhashes / dev_runtime * 1000000ull;
+		suffix_string(d64, displayed_hashes, sizeof(displayed_hashes), 4);
+		d64 = (double)cgpu->rolling * 1000000ull;
+		suffix_string(d64, displayed_rolling, sizeof(displayed_rolling), 4);
+	//	if(opt_antrouter_vil)
+	//		root = api_add_string(root, "GHS 5s", displayed_hash_rate, false);
+	//	else
+			root = api_add_string(root, "GHS 5s", displayed_rolling, false);
+		root = api_add_string(root, "GHS av", displayed_hashes, false);
+
+	
 	/*cg_wprintw(statuswin, "%6s / %6sh/s WU:%*.1f/m "
 			"A:%*.0f R:%*.0f HW:%*d",
 			displayed_rolling,

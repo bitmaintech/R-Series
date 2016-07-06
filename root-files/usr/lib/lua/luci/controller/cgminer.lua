@@ -16,9 +16,6 @@ module("luci.controller.cgminer", package.seeall)
 
 function index()
    entry({"admin", "miner", "miner"}, cbi("cgminer/cgminer"), _("R1 Miner"),1)
-   entry({"admin", "miner", "minerconfig"}, cbi("cgminer/cgminerconfig"), _("U3 Configuration"),2)
-    entry({"admin", "miner", "minerstatus"}, cbi("cgminer/cgminerstatus"), _("U3 Status"),3)
-   --entry({"admin", "status", "cgminerapi"}, call("action_cgminerapi"), _("Cgminer API Log"))
 end
 
 function action_cgminerapi()
