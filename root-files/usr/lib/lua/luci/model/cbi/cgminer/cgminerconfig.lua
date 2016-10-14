@@ -1,4 +1,4 @@
-m = Map("cgminer-u3", translate("Configuration"), translate(""))
+m = Map("cgminer", translate("Configuration"), translate(""))
 
 conf = m:section(TypedSection, "cgminer", "")
 conf.anonymous = true
@@ -45,7 +45,7 @@ pb:value("--bitmain-notempoverctrl", translate("false"))
 
 --more_options = conf:option(Value, "more_options", translate("More Options(Default: --quiet)"))
 
-
+--[[
 conf:tab("advanced", translate("Advanced Settings"))
 pb = conf:taboption("advanced", ListValue, "freq", translate("Frequency")) 
 pb.default = "0.66:206.25:1006"
@@ -65,7 +65,7 @@ pb:value("1.36:100:0783", translate("100M"))
   
 pb = conf:taboption("advanced", Value, "voltage", translate("voltage"),"Modify voltage and Save &#38; Apply, then need to Power off and Restart")
 conf:option(Value,"voltage", "voltage")
-
+--]]
 local apply = luci.http.formvalue("cbi.apply")
 if apply then
    io.popen("/etc/init.d/cgminer-u3 stop")

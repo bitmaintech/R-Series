@@ -19,14 +19,6 @@ if [ "$C" != "1" ]; then
     /etc/init.d/cgminer restart
     exit 0;
 fi
-E=`pidof cgminer-u3 | wc -w`
-if [ "$E" != "1" ]; then
-    echo "Case E"
-    killall -s 9 cgminer-u3
-    sleep 1
-    /etc/init.d/cgminer-u3 restart
-    exit 0;
-fi
 
 A=`cat /tmp/cm.log`
 B=`cgminer-api devs | grep "^   \[Last Valid Work\]"`

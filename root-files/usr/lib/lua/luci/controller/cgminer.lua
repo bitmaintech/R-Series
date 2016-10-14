@@ -15,7 +15,10 @@ $Id$
 module("luci.controller.cgminer", package.seeall)
 
 function index()
-   entry({"admin", "miner", "miner"}, cbi("cgminer/cgminer"), _("R1 Miner"),1)
+   entry({"admin", "miner", "miner"}, cbi("cgminer/cgminer"), _("R2 Status"),1)
+   entry({"admin", "miner", "minerconfig"}, cbi("cgminer/cgminerconfig"), _("R2 Configuration"),2)
+   --entry({"admin", "miner", "minerstatus"}, cbi("cgminer/cgminerstatus"), _("R2 Status"),3)
+   --entry({"admin", "status", "cgminerapi"}, call("action_cgminerapi"), _("Cgminer API Log"))
 end
 
 function action_cgminerapi()
@@ -28,6 +31,55 @@ end
 
 function num_commas(n)
    return tostring(math.floor(n)):reverse():gsub("(%d%d%d)","%1,"):gsub(",(%-?)$","%1"):reverse()
+end
+
+function stats_r2()
+   local data = {}
+   local summary = luci.util.execi("/usr/bin/cgminer-api -o stats | sed \"s/|/\\n/g\" ")
+
+   if not summary then
+      return
+   end
+
+   for line in summary do
+      local elapsed, ghs5s, ghsav,temp_l,temp_e  = line:match("Elapsed=(%d+),.*GHS 5s=(.*)G,GHS av=(.*)G,local temp=(%d+),external temp=(%d+),read_time.*")
+      if elapsed then
+         local str
+         local days
+         local h
+         local m
+         local s = elapsed % 60;
+         elapsed = elapsed - s
+         elapsed = elapsed / 60
+         if elapsed == 0 then
+            str = string.format("%ds", s)
+         else
+            m = elapsed % 60;
+            elapsed = elapsed - m
+            elapsed = elapsed / 60
+            if elapsed == 0 then
+               str = string.format("%dm %ds", m, s);
+            else
+               h = elapsed % 24;
+               elapsed = elapsed - h
+               elapsed = elapsed / 24
+               if elapsed == 0 then
+                  str = string.format("%dh %dm %ds", h, m, s)
+               else
+                  str = string.format("%dd %dh %dm %ds", elapsed, h, m, s);
+               end
+            end
+         end
+         data[#data+1] = {
+            ['elapsed'] = str,
+            ['ghs5s'] = ghs5s,
+            ['ghsav'] = ghsav,
+            ['temp_l'] = temp_l,
+            ['temp_e'] = temp_e
+         }
+      end
+   end
+   return data
 end
 
 whole_hw=0
