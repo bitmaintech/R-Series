@@ -8,7 +8,7 @@
 
 include $(TOPDIR)/rules.mk
 
-MINER_TYPE:=R2
+MINER_TYPE:=LTC-R1
 
 PKG_NAME:=cgminer
 PKG_VERSION:=4.8.0
@@ -57,7 +57,6 @@ define Package/cgminer/install
 
 	$(INSTALL_BIN) $(PKG_INSTALL_DIR)/usr/bin/cgminer $(1)/usr/bin/cgminer
 	$(INSTALL_BIN) $(FILES_DIR)/cgminer-monitor       $(1)/usr/bin
-	$(INSTALL_BIN) $(FILES_DIR)/self-checking         $(1)/usr/bin
 	$(INSTALL_BIN) $(FILES_DIR)/cgminer.init          $(1)/etc/init.d/cgminer
 	$(INSTALL_BIN) $(FILES_DIR)/usr_bak          $(1)/etc/init.d/usr_bak
 

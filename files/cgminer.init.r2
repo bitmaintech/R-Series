@@ -60,7 +60,7 @@ start() {
 	AOPTIONS="--antrouter-options 115200:$_freq"
 	#PARAMS=" --lowmem $AOPTIONS $POOL1 $POOL2 $POOL3 $_pb --api-allow $_aa --api-listen"
 	#PARAMS="-D $AOPTIONS $POOL1 $POOL2 $POOL3 $_pb $_ow $_bec --api-listen --api-network"
-	PARAMS="$AOPTIONS $POOL1 $POOL2 $POOL3 --api-listen --scrypt --api-allow $_aa  --version-file /usr/bin/compile_time --queue 50"
+	PARAMS="$AOPTIONS $POOL1 $POOL2 $POOL3 --api-listen --antrouter-vil 1 --api-allow $_aa  --version-file /usr/bin/compile_time --queue 50"
 	$APP --lowmem --bitmain-options 115200:$_freq -q >/dev/null 2>&1
 
 	sleep 1
