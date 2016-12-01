@@ -13,12 +13,12 @@ f = SimpleForm("Status", translate("Device Status"))
 f.reset = false
 f.submit = false
 
-stats = f:section(Table, luci.controller.cgminer.stats_r2(), "Status")
+stats = f:section(Table, luci.controller.cgminer.summary(), "Status")
 stats:option(DummyValue, "elapsed", translate("Elapsed"))
 stats:option(DummyValue, "ghs5s", translate("GH/S(5s)"))
 stats:option(DummyValue, "ghsav", translate("GH/S(avg)"))
-stats:option(DummyValue, "temp_l", translate("Temp(PCB)"))
-stats:option(DummyValue, "temp_e", translate("Temp(Chip)"))
+--stats:option(DummyValue, "temp_l", translate("Temp(PCB)"))
+--stats:option(DummyValue, "temp_e", translate("Temp(Chip)"))
 
 t0 = f:section(Table, luci.controller.cgminer.pools("r1"), translate("Pools"))
 t0:option(DummyValue, "pool", translate("Pool"))
