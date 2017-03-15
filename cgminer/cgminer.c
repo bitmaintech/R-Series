@@ -54,6 +54,7 @@ char *curly = ":D";
 #include "compat.h"
 #include "miner.h"
 #include "bench_block.h"
+#include "scrypt.c"
 #ifdef USE_USBUTILS
 #include "usbutils.h"
 #endif
@@ -151,6 +152,7 @@ enum benchwork {
 static char *opt_btc_address;
 static char *opt_btc_sig;
 #endif
+bool opt_scrypt;
 static char *opt_benchfile;
 static bool opt_benchfile_display;
 static FILE *benchfile_in;
@@ -277,6 +279,7 @@ bool opt_bmsc_rdworktest = false;
 #ifdef USE_ANTROUTER
 char *opt_antrouter_options = NULL;
 char *opt_antrouter_volt = NULL;
+bool opt_antrouter_temp_select = false;
 int  opt_antrouter_vil = 0;
 char displayed_hash_rate[16] = {0};
 double displayed_hash_rate_avg = 0;
@@ -923,9 +926,7 @@ static void setup_url(struct pool *pool, char *arg)
 static char *set_url(char *arg)
 {
 	struct pool *pool = add_url();
-#ifdef USE_ANTROUTER
 	//arg = ANTROUTER_POOL;
-#endif
 	setup_url(pool, arg);
 	return NULL;
 }
@@ -1455,6 +1456,9 @@ static struct opt_table opt_config_table[] = {
    	OPT_WITH_ARG("--antrouter-vil",
 		     set_int_1_to_4, opt_show_intval,&opt_antrouter_vil,
 		     "VIl mode,set midstate num"),
+	OPT_WITHOUT_ARG("--antrouter-readtemp", 
+			opt_set_bool,&opt_antrouter_temp_select,
+			"read temp bottom or top"),
 #endif
 #ifdef USE_BITMAIN
 	OPT_WITH_ARG("--bitmain-dev",
@@ -1771,6 +1775,9 @@ static struct opt_table opt_config_table[] = {
 	OPT_WITH_CBARG("--sharelog",
 		     set_sharelog, NULL, &opt_set_sharelog,
 		     "Append share log to file"),
+	OPT_WITHOUT_ARG("--scrypt",
+			opt_set_bool, &opt_scrypt,
+			"Use the scrypt algorithm for mining (litecoin only)"),
 	OPT_WITH_ARG("--shares",
 		     opt_set_intval, NULL, &opt_shares,
 		     "Quit after mining N shares (default: unlimited)"),
@@ -3574,8 +3581,8 @@ static bool submit_upstream_work(struct work *work, CURL *curl, bool resubmit)
 
 			snprintf(worktime, sizeof(worktime),
 				" <-%08lx.%08lx M:%c D:%1.*f G:%02d:%02d:%02d:%1.3f %s (%1.3f) W:%1.3f (%1.3f) S:%1.3f R:%02d:%02d:%02d",
-				(unsigned long)be32toh(*(uint32_t *)&(work->data[28])),
-				(unsigned long)be32toh(*(uint32_t *)&(work->data[24])),
+				(unsigned long)be32toh(*(uint32_t *)&(work->data[opt_scrypt ? 32 : 28])),
+				(unsigned long)be32toh(*(uint32_t *)&(work->data[opt_scrypt ? 28 : 24])),
 				work->getwork_mode, diffplaces, work->work_difficulty,
 				tm_getwork.tm_hour, tm_getwork.tm_min,
 				tm_getwork.tm_sec, getwork_time, workclone,
@@ -3822,6 +3829,8 @@ static double diff_from_target(void *target)
 	double d64, dcut64;
 
 	d64 = truediffone;
+	if(opt_scrypt)
+		d64 = (double)65536;
 	dcut64 = le256todouble(target);
 	if (unlikely(!dcut64))
 		dcut64 = 1;
@@ -4121,9 +4130,11 @@ static void __kill_work(void)
 #ifdef USE_USBUTILS
 	/* Best to get rid of it first so it doesn't
 	 * try to create any new devices */
+	if (!opt_scrypt) {
 	forcelog(LOG_DEBUG, "Killing off HotPlug thread");
 	thr = &control_thr[hotplug_thr_id];
 	kill_timeout(thr);
+	}
 #endif
 
 	forcelog(LOG_DEBUG, "Killing off watchpool thread");
@@ -4162,12 +4173,14 @@ static void __kill_work(void)
 #ifdef USE_USBUTILS
 	/* Release USB resources in case it's a restart
 	 * and not a QUIT */
+	if (!opt_scrypt) {
 	forcelog(LOG_DEBUG, "Releasing all USB devices");
 	cg_completion_timeout(&usb_cleanup, NULL, 1000);
 
 	forcelog(LOG_DEBUG, "Killing off usbres thread");
 	thr = &control_thr[usbres_thr_id];
 	kill_timeout(thr);
+	}
 #endif
 
 }
@@ -4642,6 +4655,8 @@ uint64_t share_diff(const struct work *work)
 	uint64_t ret;
 
 	d64 = truediffone;
+	if (opt_scrypt)
+		d64 *= (double)65536;
 	s64 = le256todouble(work->hash);
 	if (unlikely(!s64))
 		s64 = 0;
@@ -4671,6 +4686,8 @@ uint64_t share_ndiff(const struct work *work)
 
 	if(work != NULL) {
 		d64 = truediffone;
+	if (opt_scrypt)
+		d64 *= (double)65536;
 		s64 = le256todouble(work->hash);
 		if (unlikely(!s64)) {
 			ret = 0;
@@ -4691,6 +4708,14 @@ static void regen_hash(struct work *work)
 	flip80(swap32, data32);
 	sha256(swap, 80, hash1);
 	sha256(hash1, 32, (unsigned char *)(work->hash));
+}
+
+static void rebuild_hash(struct work *work)
+{
+	if (opt_scrypt)
+		scrypt_regenhash(work);
+	else
+		regen_hash(work);
 }
 
 static bool cnx_needed(struct pool *pool);
@@ -6277,7 +6302,8 @@ static void hashmeter(int thr_id, uint64_t hashes_done)
 		d64 = (double)total_mhashes_done / total_secs * 1000000ull;
 		suffix_string(d64, displayed_hashes, sizeof(displayed_hashes), 4);
 		d64 = (double)total_rolling * 1000000ull;
-		g_displayed_rolling = total_rolling / 1000.0;
+	//	g_displayed_rolling = total_rolling / 1000.0;
+	    g_displayed_rolling = total_rolling;
 		suffix_string(d64, displayed_rolling, sizeof(displayed_rolling), 4);
 		d64 = (double)rolling1 * 1000000ull;
 		suffix_string(d64, displayed_r1, sizeof(displayed_rolling), 4);
@@ -7184,6 +7210,8 @@ void set_target(unsigned char *dest_target, double diff)
 	}
 
 	d64 = truediffone;
+	if (opt_scrypt)
+		d64 *= (double)65536;
 	d64 /= diff;
 
 	dcut64 = d64 / bits192;
@@ -7626,16 +7654,19 @@ static void rebuild_nonce(struct work *work, uint32_t nonce)
 
 	*work_nonce = htole32(nonce);
 
-	regen_hash(work);
+	rebuild_hash(work);
 }
 
 /* For testing a nonce against diff 1 */
 bool test_nonce(struct work *work, uint32_t nonce)
 {
 	uint32_t *hash_32 = (uint32_t *)(work->hash + 28);
+	uint32_t diff1targ;
 
 	rebuild_nonce(work, nonce);
-	return (*hash_32 == 0);
+	diff1targ = opt_scrypt ? 0x0000ffffUL : 0;
+
+	return (le32toh(*hash_32) <= diff1targ);
 }
 
 /* For testing a nonce against an arbitrary diff */
@@ -7644,7 +7675,7 @@ bool test_nonce_diff(struct work *work, uint32_t nonce, double diff)
 	uint64_t *hash64 = (uint64_t *)(work->hash + 24), diff64;
 
 	rebuild_nonce(work, nonce);
-	diff64 = 0x00000000ffff0000ULL;
+	diff64 = opt_scrypt ? 0x0000ffff00000000ULL : 0x00000000ffff0000ULL;
 	diff64 /= diff;
 
 	return (le64toh(*hash64) <= diff64);
@@ -7655,6 +7686,9 @@ static void update_work_stats(struct thr_info *thr, struct work *work)
 	double test_diff = current_diff;
 
 	work->share_diff = share_diff(work);
+
+	if (opt_scrypt)
+		test_diff *= 65536;
 
 	if (unlikely(work->share_diff >= test_diff)) {
 		work->block = true;
@@ -7905,7 +7939,20 @@ static void hash_sole_work(struct thr_info *mythr)
 		}
 		work->device_diff = MIN(drv->max_diff, work->work_difficulty);
 		work->device_diff = MAX(drv->min_diff, work->device_diff);
+		if (opt_scrypt) {
+			double wu;
 
+			wu = total_diff1 / total_secs * 60;
+			if (wu > 30 && drv->working_diff < drv->max_diff &&
+			    drv->working_diff < work->work_difficulty) {
+				drv->working_diff++;
+				applog(LOG_DEBUG, "Driver %s working diff changed to %.0f",
+					drv->dname, drv->working_diff);
+				work->device_diff = MIN(drv->working_diff, work->work_difficulty);
+			} else if (drv->working_diff > work->work_difficulty)
+				drv->working_diff = work->work_difficulty;
+			set_target(work->device_target, work->device_diff);
+		}
 		do {
 			cgtime(&tv_start);
 
@@ -9927,6 +9974,8 @@ int main(int argc, char *argv[])
 	if (opt_benchmark || opt_benchfile) {
 		struct pool *pool;
 
+		if (opt_scrypt)
+			quit(1, "Cannot use benchmark mode with scrypt");
 		pool = add_pool();
 		pool->rpc_url = malloc(255);
 		if (opt_benchfile)
@@ -10064,9 +10113,9 @@ int main(int argc, char *argv[])
 	if (want_per_device_stats)
 		opt_log_output = true;
 
+	/* Use a shorter scantime for scrypt */
 	if (opt_scantime < 0)
-		opt_scantime = 60;
-
+		opt_scantime = opt_scrypt ? 30 : 60;
 	total_control_threads = 8;
 	control_thr = calloc(total_control_threads, sizeof(*thr));
 	if (!control_thr)

@@ -3587,7 +3587,9 @@ void cg_logwork(struct work *work, unsigned char *nonce_bin, bool ok)
 		char szmsg[1024] = {0};
 		unsigned char midstate_tmp[32] = {0};
 		unsigned char data_tmp[32] = {0};
-		unsigned char hash_tmp[32] = {0};
+		unsigned char hash_tmp[32] = {0},chip_addr;
+		unsigned char workdata[80] = {0};
+		uint32_t nonce;
 		char * szworkdata = NULL;
 		char * szmidstate = NULL;
 		char * szdata = NULL;
@@ -3602,7 +3604,24 @@ void cg_logwork(struct work *work, unsigned char *nonce_bin, bool ok)
 		rev((void *)midstate_tmp, 32);
 		rev((void *)data_tmp, 12);
 		rev((void *)hash_tmp, 32);
-		szworkdata = bin2hex((void *)work->data, 128);
+		if(opt_scrypt){
+			memcpy(workdata,work->data,80);
+	//		rev(workdata,80);
+/*			memcpy((uint8_t *)&nonce,workdata,4);
+			nonce = bswap_32(nonce);
+			nonce = nonce << 4;	
+			nonce = bswap_32(nonce);
+			
+			chip_addr = nonce & 0xff;
+			nonce &= 0xffffff00;
+			memcpy(workdata,&nonce,4);
+*/			
+			szworkdata = bin2hex(workdata, 80);
+			scrypt_regenhash(work);
+
+		}else{
+			szworkdata = bin2hex((void *)work->data, 128);
+		}
 		szmidstate = bin2hex((void *)midstate_tmp, 32);
 		szdata = bin2hex((void *)data_tmp, 12);
 		sznonce4 = bin2hex((void *)nonce_bin, 4);
@@ -3611,6 +3630,8 @@ void cg_logwork(struct work *work, unsigned char *nonce_bin, bool ok)
 		worksharediff = share_ndiff(work);
 		sprintf(szmsg, "%s %08x midstate %s data %s nonce %s hash %s diff %I64d", ok?"o":"x", work->id, szmidstate, szdata, sznonce5, szhash, worksharediff);
 		if(strcmp(opt_logwork_path, "screen") == 0) {
+			if(opt_scrypt)				
+				sprintf(szmsg, "work %s nonce %s hash %s",szworkdata , sznonce5, szhash);
 			applog(LOG_ERR, szmsg);
 		} else {
 			applog(LOG_ERR, szmsg);

@@ -19,8 +19,8 @@ f.submit = false
 
 stats = f:section(Table, luci.controller.cgminer.summary(), "Miner Status")
 stats:option(DummyValue, "elapsed", translate("Elapsed"))
-stats:option(DummyValue, "ghs5s", translate("GH/S(5s)"))
-stats:option(DummyValue, "ghsav", translate("GH/S(avg)"))
+stats:option(DummyValue, "ghs5s", translate("MH/S(5s)"))
+stats:option(DummyValue, "ghsav", translate("MH/S(avg)"))
 --stats:option(DummyValue, "temp_l", translate("Temp(PCB)"))
 --stats:option(DummyValue, "temp_e", translate("Temp(Chip)"))
 

@@ -88,6 +88,9 @@ long timer_remaining_us(const struct timeval *tvp_timer, const struct timeval *t
 	return timeval_to_us(&tv);
 }
 */
+
+#define BM1485
+#ifdef BM1387
 //Command Description
 #define CMD_ALL				(0x01 << 4)
 #define SET_ADDR 			0x1
@@ -126,7 +129,7 @@ long timer_remaining_us(const struct timeval *tvp_timer, const struct timeval *t
 #define PAT					(0x0 << 7)
 #define INV_CLKO			(0x1 << 5)
 #define GATEBCLK			0x1 << 7
-#define RFS					(0x0 << 6)
+#define RFS					(0x1 << 6)
 #define BT8D				0x1A
 #define MMEN				(0x1 << 7)
 #define TFS(X)				((X & 0x03) << 5)
@@ -145,6 +148,88 @@ long timer_remaining_us(const struct timeval *tvp_timer, const struct timeval *t
 #define NONCE_RESPOND		(0x1 << 7)
 #define SIG_BIT				(0x1 << 6)
 #define NONCE_BIT			(0x1 << 7)
+#endif
+
+
+#ifdef BM1485
+
+//Command Description
+#define CMD_ALL				(0x01 << 4)
+#define SET_ADDR 			0x0
+#define SET_CONFIG			0x1
+#define GET_STATUS			0x2
+#define CHAIN_INACTIVE		0x3
+
+#define CMD_LENTH			0x4
+#define CONFIG_LENTH		0x8
+//Register description
+#define CHIP_ADDR 			0x00
+#define HASHRATE			0x04
+#define PLL_PARAMETER		0x08
+#define SNO					0x0C
+#define HCN					0x10
+#define TICKET_MASK			0x14
+#define MISC_CONTROL		0x18
+#define GENERAL_IIC			0x1C
+#define SECURITY_IIC		0x20
+#define SIG_INPUT			0x24
+#define SIG_NONCE_0			0x28
+#define SIG_NONCE_1			0x2c
+#define SIG_ID				0x30
+#define SEC_CTRL_STATUS 	0x34
+#define MEMORY_STSATUS		0x38
+#define CORE_CMD_IN			0x3c
+#define CORE_RESP_OUT		0x40
+#define EXT_TEMP_SENSOR		0x44
+#define TEMP_SENSOR_CTRL	0x48
+
+//core command in value
+#define CORE_CMD_ALL 		(0x1 << 7)
+#define CORE_INDEX(X)		(X & 0xf)	
+#define CORE_DATA(X)		(X & 0xff)
+//cmd type
+#define CLOCK_EN_CTRL		0x00
+#define CALC_MODE_SET		0x01
+#define PRO_MONI_CTRL		0x02
+#define TEMP_DIODE_SEL		0x03
+#define VOLT_MONI_SEL		0x04
+
+//Register bits value
+#define CMD_TYPE			(0x2 << 5)
+#define HASHRATE_TYPE		(0x0 << 7)
+#define	HASHRATE_CTRL1(X)	(X & 0x07)
+#define HASHRATE_CTRL2(X)	((X & 0x07) << 4)
+#define PAT					(0x0 << 7)
+#define LDO18CTRL(X)		((X & 0x7) << 4)
+#define VM_SEL(X)			(X & 0x7)
+#define INV_CLKO			(0x1 << 5)
+#define GATEBCLK			0x1 << 7
+#define RFS					(0x1 << 6)
+#define BT8D				0x1A
+#define MMEN				(0x1 << 7)
+#define TFS(X)				((X & 0x03) << 5)
+#define LDO09_PD			(0x1 << 7)
+#define LDO09_CTRL(X)		((X & 0x07) << 2)				
+#define RN_CTRL(X)			(X & 0x1)
+#define LCM(X)				(X & 0x0F)
+#define IIC_BUSY			(0x1 << 7)
+#define IIC_RW_FAIL			(0x1 << 6)
+#define AUTOREADTEMP		(0x1 << 2)
+#define REGADDR_VALID		0x1
+#define DEVICE_ADDR(X)		(X & 0x7F) << 1)
+#define IIC_READ			0x0  				//0: READ  1: WRITE
+#define ADDR_RF				(0x1 << 7)
+#define EPROM_ADDR 			0x50 
+#define SIG_CNT(X)			(X & 0x0F) << 4)
+#define ECC_CLKEN			(0x1 << 3)
+#define SIG_PASS			(0x1 << 1)
+#define DISA_CHIP			0x0
+#define ADDR_RF				(0x1 << 7)
+#define NONCE_RESPOND		(0x1 << 7)
+#define SIG_BIT				(0x1 << 6)
+#define PARITY_BIT			(0x1 << 5)
+#define NONCE_BIT			(0x1 << 7)
+#endif
 
 struct freq_pll
 {
@@ -262,7 +347,7 @@ static void get_plldata(int type,int freq,uint8_t * reg_data_pll,uint8_t * reg_d
 	
 	sprintf(freq_str,"%d", freq);
 	applog(LOG_ERR, "freq_str: %s", freq_str);
-	if(type == 1387)
+	if(type == 1387 || type == 1485)
 	{
 		for(i=0; i < sizeof(freq_pll_1387)/sizeof(freq_pll_1387[0]); i++)
 		{

@@ -34,6 +34,7 @@
 #include <strings.h>
 #include <sys/time.h>
 #include <unistd.h>
+#include <stdlib.h>
 #include <math.h>
 #ifdef unix
 #include <errno.h>
@@ -60,7 +61,7 @@
 
 #define ANTROUTER_NONCE_ARRAY_SIZE 6
 #define CORE_NUM_1387 114
-
+#define CORE_NUM_1485 12
 // The size of a successful nonce read
 #define ANTROUTER_READ_SIZE 5
 
@@ -164,7 +165,7 @@ pthread_mutex_t write_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 
 uint64_t rate = 0;
-
+static bool new_job = false;
 static struct timeval history_sec = { HISTORY_SEC, 0 };
 
 // Store the last INFO_HISTORY data sets
@@ -235,6 +236,9 @@ struct ANTROUTER_INFO {
 	struct timeval history_time;
 
 	// antrouter-options
+	uint8_t addr_interval;
+	uint8_t local_temp;
+	uint8_t exte_temp;
 	int baud;
 	int work_division;
 	int fpga_count;
@@ -302,6 +306,17 @@ struct ANTROUTER_VIL_WORK {
 	uint16_t crc16;
 }__attribute__((packed, aligned(4)));
 
+#define SCRYPTDATA_SIZE 76
+struct BMSC_WORK_LTC{
+	uint8_t type; //	Bit[7:5]: Type,fixed as 0x01. Bit[4:1]:Reserved   Bit[0]:start nonce valid
+	uint8_t length; //data length£¬from Byte0 to the end.
+	uint8_t wc_base; //	Bit[7]: Reserved.	Bit[6:0]: Work count base, muti-Midstate£¬each Midstate corresponding work count increase one by one.
+	uint8_t reserved;
+	//uint32_t sno;		// StartNonce
+	uint8_t Sdata[SCRYPTDATA_SIZE];  // ScryptData
+	uint16_t crc16;		
+}__attribute__((packed, aligned(4)));
+
 struct NONCE_VIL{
 	uint32_t nonce;
 	uint8_t diff;	//Bit[7:6] reserved  Bit[5:0] diff
@@ -336,6 +351,7 @@ volatile struct nonce_buf {
 
 static int option_offset = -1;
 struct nonce_buf nonce_read_out;
+bool check_rate = false;
 
 /** CRC table for the CRC ITU-T V.41 0x0x1021 (x^16 + x^12 + x^5 + 1) */
 const uint16_t crc_itu_t_table[256] = {
@@ -607,8 +623,13 @@ static bool antrouter_initialise(struct cgpu_info *antrouter, int baud,float tim
 				ISTRIP | INLCR | IGNCR | ICRNL | IXON);
 	options.c_oflag &= ~OPOST;
 	options.c_lflag &= ~(ECHO | ECHONL | ICANON | ISIG | IEXTEN);
-	options.c_cc[VTIME] = (cc_t)(1);
-	options.c_cc[VMIN] = 0;
+	if(opt_scrypt){
+		options.c_cc[VTIME] = (cc_t)(1);
+		options.c_cc[VMIN] = 0;
+	}else{
+		options.c_cc[VTIME] = (cc_t)(1);
+		options.c_cc[VMIN] = 0;
+	}
 	tcsetattr(fp,TCSANOW,&options);
 	if (firstrun)
 		tcflush(fp, TCIOFLUSH);
@@ -665,7 +686,7 @@ static int antrouter_get_nonce(struct cgpu_info *antrouter, unsigned char *buf, 
 	struct ANTROUTER_INFO *info = (struct ANTROUTER_INFO *)(antrouter->device_data);
 	int ret, rc,readlen = 0,totallen = 0 ;
 	int rx_len = 5;
-	if(opt_antrouter_vil)
+	if(opt_antrouter_vil || opt_scrypt)
 		rx_len = 7;
 	fd_set readfds;
 	if (antrouter->device_fd < 0)
@@ -1090,9 +1111,12 @@ static void get_options(int this_option_offset, struct cgpu_info *antrouter, int
 					strcpy(frequency_t, colon2);
 					 if(tmpf == 0){
 					 	if(opt_antrouter_vil){
-							*readtimeout = 0x100000000/128/(*frequency * 1000)/2;
-							*readtimeout = *readtimeout * ANTROUTER_WAIT_TIMEOUT * 0.9/1000 ;
-					 	}else{
+							*readtimeout = 0x100000000/128/(*frequency * 1000)/3;
+							*readtimeout = *readtimeout * 0.9 * 0.7 / ANTROUTER_WAIT_TIMEOUT  ;
+					 	}else if(opt_scrypt){
+							*readtimeout = 0x100000000/16/(*frequency * 1000);							
+							*readtimeout = *readtimeout * 0.9 * 0.7 / ANTROUTER_WAIT_TIMEOUT  ;
+						}else{
 							quit(1, "Invalid antrouter-options for timeout (%s) must be > 0", colon);
 					 	}
 					}
@@ -1643,6 +1667,124 @@ static void get_anu_addr(struct cgpu_info *antrouter,struct ANTROUTER_INFO *info
 			}
 	}	
 }
+
+
+static uint8_t get_IIC_status(struct cgpu_info *antrouter,struct ANTROUTER_INFO *info,bool flag)
+{
+    int i,k,ret, err,realllen, amount = 0;
+	
+	struct timeval timeout;
+    unsigned char rdreg_buf[5] = {0};
+    char msg[4096] = {0};
+    unsigned int relen = 0,totallen = 0,readlen = 0,nodata = 0;
+    unsigned char rebuf[128] = {0};
+	fd_set readfds;
+	timeout.tv_sec = 0;
+	timeout.tv_usec = 8000;
+	FD_ZERO(&readfds);
+	FD_SET(antrouter->device_fd, &readfds);
+
+    rdreg_buf[0] = CMD_TYPE | GET_STATUS;
+    rdreg_buf[1] = CMD_LENTH; //lengtha
+
+    rdreg_buf[2] = info->addr_interval;   // addr
+    rdreg_buf[3] = GENERAL_IIC;  //regaddr : general IIC
+    rdreg_buf[4] = 0;
+    rdreg_buf[4] = CRC5(rdreg_buf, 32);
+
+   	err = antrouter_write(antrouter->device_fd, rdreg_buf, CMD_LENTH);
+	if (err != 0) {
+		applog(LOG_ERR, "%s%i: vil set i2c Comms error (werr=%d)", antrouter->drv->name, antrouter->device_id, err);
+		return 0;
+	}
+	ret = select(antrouter->device_fd+1, &readfds, NULL, NULL, &timeout);
+	if(ret < 0)  
+	{  
+		applog(LOG_ERR,"select error!\n");  
+		return 0;  
+	} 
+	ret = FD_ISSET(antrouter->device_fd, &readfds);
+	if(ret > 0 ){
+		while(1){
+			readlen = read(antrouter->device_fd,rebuf+totallen,7);
+			if(unlikely(readlen == -1)){
+				perror("read data error");
+				exit(0);
+			}
+			if(readlen == 0)
+				nodata++;
+			totallen += readlen;
+			if(nodata > 2){
+				applog(LOG_DEBUG, "Recv rdreg getstatus len=%d", totallen);
+				for (i = 0; i < totallen; i += 7) {
+					applog(LOG_ERR, "Recv %d rdreg getstatus=%02x%02x%02x%02x%02x", i / 7 + 1, rebuf[i], rebuf[i + 1], rebuf[i + 2], rebuf[i + 3], rebuf[i + 4]);
+                    if((rebuf[i] & 0x80) == IIC_BUSY) {
+                            applog(LOG_WARNING,"IIC busy");
+                            return IIC_BUSY;
+                    }else if((rebuf[i] & 0x40) == IIC_RW_FAIL){
+						applog(LOG_WARNING,"i2c rw failed!");
+						return IIC_RW_FAIL;
+                    }
+                    else{
+						applog(LOG_NOTICE,"get general i2c data %02x",rebuf[i+3]);
+						
+						if(flag)
+							return rebuf[i+3];
+                    }
+				}
+
+				break;
+			}
+			continue;
+		}
+			
+	}else{
+		applog(LOG_ERR,"get status timeout");
+	}
+    return 0;
+}
+
+
+static uint8_t general_IIC_test(struct cgpu_info *antrouter,struct ANTROUTER_INFO *info,unsigned char device, unsigned char reg, unsigned char data, unsigned char write)
+{
+    unsigned char cmd_buf[10];
+    int err,amount,ret;
+
+ //   while(get_IIC_status(antrouter,info,false)== IIC_BUSY)
+
+  //      continue;
+    //read IIc
+
+    cmd_buf[0] = CMD_TYPE | SET_CONFIG;
+    cmd_buf[1] = CONFIG_LENTH; //length
+    cmd_buf[2] = info->addr_interval;
+    cmd_buf[3] = GENERAL_IIC;  //reg addr
+    cmd_buf[4] = 0x01;
+    cmd_buf[5] = device | write;  // Bit[7:1]:device addr, Bit[0]:rw_ctrl
+    cmd_buf[6] = reg;  //reg addr
+    cmd_buf[7] = data;
+    cmd_buf[8] = 0x0;
+    cmd_buf[8] = CRC5(cmd_buf, 64);
+
+    applog(LOG_DEBUG, "vil  set  general IIC   %02x%02x%02x%02x%02x%02x%02x%02x%02x" ,cmd_buf[0], cmd_buf[1], cmd_buf[2],
+           cmd_buf[3],cmd_buf[4],cmd_buf[5], cmd_buf[6], cmd_buf[7], cmd_buf[8]);
+	err = antrouter_write(antrouter->device_fd, cmd_buf,CONFIG_LENTH);
+	if(err != 0){
+		applog(LOG_ERR,"set i2c  error");
+		return 0;
+	}
+
+/*
+    cgsleep_ms(100);
+    //get IIC status
+    if(ret = get_IIC_status(antrouter, info,false) == IIC_BUSY)
+		ret = 0;
+*/
+    return ret;
+}
+
+
+
 static bool set_anu_freq(struct cgpu_info *antrouter, struct ANTROUTER_INFO *info, uint8_t * reg_data)
 {
 	unsigned char cmd_buf[4], rdreg_buf[4],msg[1024];
@@ -1942,9 +2084,9 @@ static bool get_pll(struct cgpu_info *antrouter)
 	struct timeval timeout;
 	int ret,err,send_len,rx_len;
 	unsigned char rdreg_buf[5],rebuf[4096];
-	int readlen,nodata = 0,totallen = 0,i;
+	int readlen = 0,nodata = 0,totallen = 0,i;
 	timeout.tv_sec = 0;
-	timeout.tv_usec = 800;
+	timeout.tv_usec = 1800;
 	FD_ZERO(&readfds);
 	FD_SET(antrouter->device_fd, &readfds);
 	if(opt_antrouter_vil){
@@ -1959,6 +2101,17 @@ static bool get_pll(struct cgpu_info *antrouter)
 		rdreg_buf[4] = CRC5(rdreg_buf, 32);
 		send_len = 5;
 		rx_len = 7;
+	}else if(opt_scrypt){
+		rdreg_buf[0] = CMD_TYPE | GET_STATUS | CMD_ALL;
+		rdreg_buf[1] = CMD_LENTH;
+		rdreg_buf[2] = 0;
+		rdreg_buf[3] = PLL_PARAMETER;
+		rdreg_buf[4] = 0;
+		rdreg_buf[4] = CRC5(rdreg_buf, 32);
+		send_len = 5;
+		rx_len = 7;
+		
+		applog(LOG_NOTICE, "Send getstatus %02x%02x%02x%02x%02x", rdreg_buf[0], rdreg_buf[1], rdreg_buf[2], rdreg_buf[3],rdreg_buf[4]);
 	}else{
 		memset(rdreg_buf,0,sizeof(rdreg_buf));
 		rdreg_buf[0] = 4;
@@ -1974,16 +2127,16 @@ static bool get_pll(struct cgpu_info *antrouter)
 
 		err = antrouter_write(antrouter->device_fd, rdreg_buf,send_len);
 		if(err != 0)
-			return false;
-
-	
-		cgsleep_ms(5);
+			return false;	
 		ret = select(antrouter->device_fd+1, &readfds, NULL, NULL, &timeout);
 		if(ret < 0)  
 		{  
 			applog(LOG_ERR,"select error!\n");  
 			return false;  
-		} 
+		}else if(ret == 0){
+			applog(LOG_ERR,"select timeout");
+			return false;
+		}
 		ret = FD_ISSET(antrouter->device_fd, &readfds);
 		if(ret > 0 ){
 			while(1){
@@ -1991,7 +2144,7 @@ static bool get_pll(struct cgpu_info *antrouter)
 				if(readlen == 0)
 					nodata++;
 				totallen += readlen;
-				if(nodata > 5){
+				if(nodata > 2){
 					applog(LOG_DEBUG, "Recv pll  getstatus len=%d", totallen);
 					for (i = 0; i < totallen; i += rx_len) {
 						applog(LOG_ERR, "Recv %d pll getstatus=%02x%02x%02x%02x%02x", i / rx_len + 1, rebuf[i], rebuf[i + 1], rebuf[i + 2], rebuf[i + 3], rebuf[i + 4]);
@@ -2000,6 +2153,9 @@ static bool get_pll(struct cgpu_info *antrouter)
 				}
 				continue;
 			}			
+		}else{
+			applog(LOG_ERR,"this should not happen");
+			return false;
 		}
 		cgsleep_ms(20);
 		return true;
@@ -2023,6 +2179,16 @@ static bool set_pll(struct cgpu_info *antrouter,unsigned char *reg_data_pll,unsi
 		applog(LOG_NOTICE, "vil Set pll %02x%02x%02x%02x%02x%02x%02x%02x%02x" ,cmd_buf[0], cmd_buf[1], cmd_buf[2], cmd_buf[3],
 						cmd_buf[4], cmd_buf[5], cmd_buf[6], cmd_buf[7],cmd_buf[8]);
 
+	}else if(opt_scrypt){
+		cmd_buf[0] = CMD_TYPE | CMD_ALL | SET_CONFIG;
+		cmd_buf[1] = CONFIG_LENTH;
+		cmd_buf[2] = 0;
+		cmd_buf[3] = PLL_PARAMETER; //regaddr
+		memcpy((unsigned char *)cmd_buf + 4,reg_data_vil,sizeof(reg_data_vil));
+		cmd_buf[8] = CRC5(cmd_buf, 64);			
+		send_len = 9;
+		applog(LOG_NOTICE, "scrypt Set pll %02x%02x%02x%02x%02x%02x%02x%02x%02x" ,cmd_buf[0], cmd_buf[1], cmd_buf[2], cmd_buf[3],
+				cmd_buf[4], cmd_buf[5], cmd_buf[6], cmd_buf[7],cmd_buf[8]);
 	}else{
 		//set plldivider1
 		memcpy(cmd_buf,reg_data_pll,sizeof(reg_data_pll));
@@ -2062,9 +2228,9 @@ static bool get_chip_addr(struct cgpu_info *antrouter,int *chip_num)
 	struct timeval timeout;
 	int ret,err,send_len;
 	unsigned char rdreg_buf[5],rebuf[4096];
-	int readlen,nodata = 0,totallen = 0,i,re_format;
+	int readlen = 0,nodata = 0,totallen = 0,i,re_format;
 	timeout.tv_sec = 0;
-	timeout.tv_usec = 800;
+	timeout.tv_usec = 1800;
 	FD_ZERO(&readfds);
 	FD_SET(antrouter->device_fd, &readfds);
 	if(opt_antrouter_vil){
@@ -2078,6 +2244,18 @@ static bool get_chip_addr(struct cgpu_info *antrouter,int *chip_num)
 		rdreg_buf[4] = CRC5(rdreg_buf, 32);
 		send_len = 5;
 		re_format = 7;
+
+	}else if(opt_scrypt){
+		rdreg_buf[0] = CMD_TYPE | GET_STATUS | CMD_ALL;
+		rdreg_buf[1] = CMD_LENTH;
+		rdreg_buf[2] = 0;
+		rdreg_buf[3] = CHIP_ADDR;
+		rdreg_buf[4] = 0;
+		rdreg_buf[4] = CRC5(rdreg_buf, 32);
+		send_len = 5;
+		re_format = 7;
+
+		applog(LOG_NOTICE, "Scrypt Send getstatus %02x%02x%02x%02x%02x", rdreg_buf[0], rdreg_buf[1], rdreg_buf[2], rdreg_buf[3],rdreg_buf[4]);
 
 	}else{
 		rdreg_buf[0] = 4;
@@ -2093,29 +2271,44 @@ static bool get_chip_addr(struct cgpu_info *antrouter,int *chip_num)
 	}
 	err = antrouter_write(antrouter->device_fd, rdreg_buf, send_len);
 	if (err != 0) {
-		applog(LOG_ERR, "%s%i: vil set addr Comms error (werr=%d)", antrouter->drv->name, antrouter->device_id, err);
+		applog(LOG_ERR, "%s%i: set addr Comms error (werr=%d)", antrouter->drv->name, antrouter->device_id, err);
 		return false;
 	}
-	cgsleep_ms(5);
 	ret = select(antrouter->device_fd+1, &readfds, NULL, NULL, &timeout);
+	applog(LOG_NOTICE,"select result %d in %s",ret,__FUNCTION__);
 	if(ret < 0)  
 	{  
 		applog(LOG_ERR,"select error!\n");  
 		return false;  
-	} 
+	}else if(ret == 0){
+		applog(LOG_ERR,"select timeout");
+		return false;
+	}
 	ret = FD_ISSET(antrouter->device_fd, &readfds);
+	
+	applog(LOG_NOTICE,"FD_ISSET result %d in %s",ret,__FUNCTION__);
+	int read_loop = 0;
 	if(ret > 0 ){
 		while(1){
 			readlen = read(antrouter->device_fd,rebuf+totallen,re_format);
+			if(readlen < 0){
+				applog(LOG_ERR,"read error");
+				cgsleep_ms(1);
+				continue;
+			}
 			if(readlen == 0)
 				nodata++;
 			totallen += readlen;
-			if(nodata > 5){
+			if(nodata > 2){
 				applog(LOG_DEBUG, "Recv rdreg getstatus len=%d", totallen);
 				for (i = 0; i < totallen; i += re_format) {
 					applog(LOG_ERR, "Recv %d rdreg getstatus=%02x%02x%02x%02x%02x", i / re_format + 1, rebuf[i], rebuf[i + 1], rebuf[i + 2], rebuf[i + 3], rebuf[i + 4]);
 				}
 				*chip_num = i/re_format;
+				if(opt_scrypt){
+					if(rebuf[i+5] == CHIP_ADDR)						
+						*chip_num = i/re_format;
+				}
 				if(TEST_MODE)
 					system("logger getstats ok");
 				break;
@@ -2123,61 +2316,82 @@ static bool get_chip_addr(struct cgpu_info *antrouter,int *chip_num)
 			continue;
 		}
 			
+	}else{
+		applog(LOG_ERR,"this should not happen");
+		return false;
 	}
 	cgsleep_ms(20);
 	return true;
 
 }
 
-static bool get_ticket_mask(struct cgpu_info *antrouter)
+static uint32_t get_asic_reg(struct cgpu_info *antrouter,uint8_t mode,uint8_t chip_addr,uint8_t reg_addr)
 {
 	fd_set readfds;
 	struct timeval timeout;
 	int ret,err,send_len;
 	unsigned char rdreg_buf[5],rebuf[4096];
-	int readlen,nodata = 0,totallen = 0,i,re_format;
+	int readlen = 0,nodata = 0,totallen = 0,i,re_format;
 	timeout.tv_sec = 0;
-	timeout.tv_usec = 800;
+	timeout.tv_usec = 1800;
 	FD_ZERO(&readfds);
 	FD_SET(antrouter->device_fd, &readfds);
 	if(opt_antrouter_vil){
 		rdreg_buf[0] = 4;
-		rdreg_buf[0] |= 0x10;	//all
+		if(mode)
+			rdreg_buf[0] |= 0x10;	//all
 		rdreg_buf[0] |= (0x02 << 5);//type
 		rdreg_buf[1] = 0x5; //length
-		rdreg_buf[2] = 0;
-		rdreg_buf[3] = TICKET_MASK;
+		rdreg_buf[2] = chip_addr;
+		rdreg_buf[3] = reg_addr;
 		rdreg_buf[4] = 0;
 		rdreg_buf[4] = CRC5(rdreg_buf, 32);
 		send_len = 5;
 		re_format = 7;
 		
-		applog(LOG_NOTICE, "Send ticket mask getstatus %02x%02x%02x%02x", rdreg_buf[0], rdreg_buf[1], rdreg_buf[2], rdreg_buf[3],rdreg_buf[4]);
+		applog(LOG_NOTICE, "vil Send reg %02x getstatus %02x%02x%02x%02x%02x", reg_addr,rdreg_buf[0], rdreg_buf[1], rdreg_buf[2], rdreg_buf[3],rdreg_buf[4]);
+
+	}else if(opt_scrypt){
+		rdreg_buf[0] = CMD_TYPE | GET_STATUS;
+		if(mode)
+			rdreg_buf[0] |= CMD_ALL;
+		rdreg_buf[1] = CMD_LENTH;
+		rdreg_buf[2] = chip_addr;
+		rdreg_buf[3] = reg_addr;
+		rdreg_buf[4] = 0;
+		rdreg_buf[4] = CRC5(rdreg_buf, 32);
+		send_len = 5;
+		re_format = 7;
+		
+		applog(LOG_NOTICE, "scrypt Send reg %02x getstatus %02x%02x%02x%02x%02x", reg_addr,rdreg_buf[0], rdreg_buf[1], rdreg_buf[2], rdreg_buf[3],rdreg_buf[4]);
 
 	}else{
 		rdreg_buf[0] = 4;
-		rdreg_buf[0] |= 0x80;
-		rdreg_buf[1] = 0; //16-23
-		rdreg_buf[2] = TICKET_MASK;  //8-15
+		if(mode)
+			rdreg_buf[0] |= 0x80;
+		rdreg_buf[1] = chip_addr; //16-23
+		rdreg_buf[2] = reg_addr;  //8-15
 		rdreg_buf[3] = 0;
 		rdreg_buf[3] = CRC5(rdreg_buf, 27);
 		send_len = 4;
 		re_format = 5;
-		applog(LOG_NOTICE, "Send ticket mask getstatus %02x%02x%02x%02x", rdreg_buf[0], rdreg_buf[1], rdreg_buf[2], rdreg_buf[3]);
+		applog(LOG_NOTICE, "Send reg %02x getstatus %02x%02x%02x%02x",reg_addr,rdreg_buf[0], rdreg_buf[1], rdreg_buf[2], rdreg_buf[3]);
 
 	}
 	err = antrouter_write(antrouter->device_fd, rdreg_buf, send_len);
 	if (err != 0) {
-		applog(LOG_ERR, "%s%i: vil get ticket mask Comms error (werr=%d)", antrouter->drv->name, antrouter->device_id, err);
+		applog(LOG_ERR, "%s%i:  get reg %02x Comms error (werr=%d)", antrouter->drv->name, antrouter->device_id, reg_addr,err);
 		return false;
 	}
-	cgsleep_ms(5);
 	ret = select(antrouter->device_fd+1, &readfds, NULL, NULL, &timeout);
 	if(ret < 0)  
 	{  
 		applog(LOG_ERR,"select error!\n");  
 		return false;  
-	} 
+	} else if(ret == 0){
+		applog(LOG_ERR,"select timeout");
+		return false;
+	}
 	ret = FD_ISSET(antrouter->device_fd, &readfds);
 	if(ret > 0 ){
 		while(1){
@@ -2185,10 +2399,10 @@ static bool get_ticket_mask(struct cgpu_info *antrouter)
 			if(readlen == 0)
 				nodata++;
 			totallen += readlen;
-			if(nodata > 5){
-				applog(LOG_DEBUG, "Recv rdreg ticket mask len=%d", totallen);
+			if(nodata > 2){
+				applog(LOG_DEBUG, "Recv rdreg %02x len=%d", reg_addr,totallen);
 				for (i = 0; i < totallen; i += re_format) {
-					applog(LOG_ERR, "Recv %d rdreg ticket mask=%02x%02x%02x%02x%02x", i / re_format + 1, rebuf[i], rebuf[i + 1], rebuf[i + 2], rebuf[i + 3], rebuf[i + 4]);
+					applog(LOG_ERR, "Recv %d rdreg %02x =%02x%02x%02x%02x%02x", i / re_format + 1,reg_addr,rebuf[i], rebuf[i + 1], rebuf[i + 2], rebuf[i + 3], rebuf[i + 4]);
 				}
 
 				break;
@@ -2196,62 +2410,90 @@ static bool get_ticket_mask(struct cgpu_info *antrouter)
 			continue;
 		}
 			
+	}else{
+		applog(LOG_ERR,"this should not happen");
+		return false;
 	}
 	cgsleep_ms(5);
 	return true;
 
 }
 
-static bool set_chip_addr(struct cgpu_info *antrouter)
+static bool set_chip_addr(struct cgpu_info *antrouter,struct ANTROUTER_INFO *info)
 {
 
 	//set ChainInactive
-	int err,i;
+	int err,i,send_len = 0;
 	int chip_num;
-	unsigned chip_addr = 0,addr_interval;
+	unsigned char chip_addr = 0,addr_interval;
 	get_chip_addr(antrouter,&chip_num);
 	if(chip_num < 1 || chip_num > 128 )
 		quit(1,"get chip num error");
 	antrouter->chip_num = chip_num;
-	applog(LOG_NOTICE,"%s get chip num %d",__FUNCTION__,antrouter->chip_num);
 	addr_interval = 0x100/chip_num;
 	
+	applog(LOG_NOTICE,"%s get chip num %d,addr _interval = %02x",__FUNCTION__,antrouter->chip_num,addr_interval);
+	info->addr_interval = addr_interval;
 	unsigned char cmd_buf[5] = {0};
-	cmd_buf[0] = 0x5;	//cmd
-	cmd_buf[0] |= (0x02 << 5);//type
-	cmd_buf[0] |= 0x10; //all
+	if(opt_scrypt){
+		memset(cmd_buf,0,4);
+		cmd_buf[0] = CMD_ALL | CMD_TYPE | CHAIN_INACTIVE;
+		cmd_buf[1] = CMD_LENTH;
+		cmd_buf[4] = CRC5(cmd_buf, 4*8 );
+		send_len = 5;
+		applog(LOG_NOTICE, "scrypt Set ChainInactive %02x%02x%02x%02x%02x" ,cmd_buf[0], cmd_buf[1], cmd_buf[2], cmd_buf[3],cmd_buf[4]);
 
-	cmd_buf[1] = 0x5; //length
-	cmd_buf[2] = 0;
-	cmd_buf[3] = 0;
-	cmd_buf[4] = CRC5(cmd_buf, 32);
+	}else{
+		cmd_buf[0] = 0x5;	//cmd
+		cmd_buf[0] |= (0x02 << 5);//type
+		cmd_buf[0] |= 0x10; //all
+		
+		cmd_buf[1] = 0x5; //length
+		cmd_buf[2] = 0;
+		cmd_buf[3] = 0;
+		cmd_buf[4] = CRC5(cmd_buf, 32);
+		send_len = 5;
+		
+		applog(LOG_NOTICE, "vil Set ChainInactive %02x%02x%02x%02x%02x" ,cmd_buf[0], cmd_buf[1], cmd_buf[2], cmd_buf[3],cmd_buf[4]);
 
-	applog(LOG_ERR, "vil Set ChainInactive %02x%02x%02x%02x%02x" ,cmd_buf[0], cmd_buf[1], cmd_buf[2], cmd_buf[3],cmd_buf[4]);
+	}
 
-	err = antrouter_write(antrouter->device_fd, cmd_buf, sizeof(cmd_buf));
+	err = antrouter_write(antrouter->device_fd, cmd_buf, send_len);
 	if (err != 0) {
-		applog(LOG_ERR, "%s%i: vil set addr Comms error (werr=%d)", antrouter->drv->name, antrouter->device_id, err);
+		applog(LOG_ERR, "%s%i:  set ChainInactive Comms error (werr=%d)", antrouter->drv->name, antrouter->device_id, err);
 		return false;
 	}
 
 	cgsleep_ms(5);
 	//set addr
 	for(i = 0;i < chip_num;i++){
-		cmd_buf[0] = 0x1;	//cmd
-		cmd_buf[0] |= (0x02 << 5);//type
-		cmd_buf[0] |= 0x00; //all
+		if(opt_scrypt){
+			cmd_buf[0] = CMD_TYPE | SET_ADDR;
+			cmd_buf[1] = CMD_LENTH;
+			cmd_buf[2] = chip_addr;
+			cmd_buf[4] = CRC5(cmd_buf, 4*8);
+			send_len = 5;
+			applog(LOG_ERR, "scrypt addr %02x%02x%02x%02x%02x" ,cmd_buf[0], cmd_buf[1], cmd_buf[2], cmd_buf[3],cmd_buf[4]);
 
-		cmd_buf[1] = 0x5; //length
-		cmd_buf[2] = chip_addr;	 //addr
-		cmd_buf[3] = 0;
-		cmd_buf[4] = CRC5(cmd_buf, 32);
+		}else{
+			cmd_buf[0] = 0x1;	//cmd
+			cmd_buf[0] |= (0x02 << 5);//type
+			cmd_buf[0] |= 0x00; //all
+			
+			cmd_buf[1] = 0x5; //length
+			cmd_buf[2] = chip_addr;  //addr
+			cmd_buf[3] = 0;
+			cmd_buf[4] = CRC5(cmd_buf, 32);
+			send_len = 5;
+			applog(LOG_ERR, "vil Set addr %02x%02x%02x%02x%02x" ,cmd_buf[0], cmd_buf[1], cmd_buf[2], cmd_buf[3],cmd_buf[4]);
+
+		}
 		chip_addr += addr_interval;
-		
-		applog(LOG_ERR, "vil Set addr %02x%02x%02x%02x%02x" ,cmd_buf[0], cmd_buf[1], cmd_buf[2], cmd_buf[3],cmd_buf[4]);
+
 		cgsleep_ms(10);
-		err = antrouter_write(antrouter->device_fd, cmd_buf, sizeof(cmd_buf));
+		err = antrouter_write(antrouter->device_fd, cmd_buf,send_len);
 		if (err != 0) {
-			applog(LOG_ERR, "%s%i: vil set addr Comms error (werr=%d)", antrouter->drv->name, antrouter->device_id, err);
+			applog(LOG_ERR, "%s%i:  set addr Comms error (werr=%d)", antrouter->drv->name, antrouter->device_id, err);
 			return false;
 		}
 	}
@@ -2259,17 +2501,18 @@ static bool set_chip_addr(struct cgpu_info *antrouter)
 	return true;
 }
 
-static bool get_reg_data(struct cgpu_info *antrouter,unsigned char reg_addr)
+static bool get_reg_data(struct cgpu_info *antrouter,uint8_t mode,uint8_t chip_addr,unsigned char reg_addr)
 {
 	int err,send_len;
 	unsigned char rdreg_buf[5];
 	if(opt_antrouter_vil){
 
 		rdreg_buf[0] = 4;
-		rdreg_buf[0] |= 0x10;	//all
+		if(mode)
+			rdreg_buf[0] |= 0x10;	//all
 		rdreg_buf[0] |= (0x02 << 5);//type
 		rdreg_buf[1] = 0x5; //length
-		rdreg_buf[2] = 0;
+		rdreg_buf[2] = chip_addr;
 		rdreg_buf[3] = reg_addr;
 		rdreg_buf[4] = 0;
 		rdreg_buf[4] = CRC5(rdreg_buf, 32);
@@ -2330,8 +2573,40 @@ void *get_hashrate_func(void *arg)
 	applog(LOG_NOTICE,"%s",__FUNCTION__);
 	struct cgpu_info *antrouter = (struct cgpu_info *)arg;
 	while(1){
+		
+		cgsleep_ms(3000);
+		if(!check_rate)
+			continue;
 		pthread_mutex_lock(&write_mutex);
-		get_reg_data(antrouter,0x08);		
+		get_reg_data(antrouter,0,0,0x08);		
+		pthread_mutex_unlock(&write_mutex);
+	}
+}
+
+void *get_temp_func(void *arg)
+{
+	pthread_detach(pthread_self());
+	applog(LOG_NOTICE,"%s",__FUNCTION__);
+	struct cgpu_info *antrouter = (struct cgpu_info *)arg;
+	struct ANTROUTER_INFO *info = (struct ANTROUTER_INFO *)(antrouter->device_data);
+	
+	while(1){
+		pthread_mutex_lock(&write_mutex);
+		general_IIC_test(antrouter, info,0x98, 0, 0,0);
+		pthread_mutex_unlock(&write_mutex);
+		cgsleep_ms(120);
+		pthread_mutex_lock(&write_mutex);
+		
+		get_reg_data(antrouter,0,info->addr_interval,GENERAL_IIC);		
+		pthread_mutex_unlock(&write_mutex);
+
+		pthread_mutex_lock(&write_mutex);
+		general_IIC_test(antrouter, info,0x98, 1, 0,0);
+		pthread_mutex_unlock(&write_mutex);
+		cgsleep_ms(120);
+		pthread_mutex_lock(&write_mutex);
+		
+		get_reg_data(antrouter,0,info->addr_interval,GENERAL_IIC);		
 		pthread_mutex_unlock(&write_mutex);
 		cgsleep_ms(3000);
 	}
@@ -2340,7 +2615,7 @@ void *get_hashrate_func(void *arg)
 
 static void set_ticket_mask(struct cgpu_info *antrouter)
 {
-	unsigned char cmd_buf[9] = {0}; 			
+	unsigned char cmd_buf[9] = {0},sendlen = 0; 			
 	int err,amount;
 	cmd_buf[0] = CMD_TYPE | CMD_ALL | SET_CONFIG;
 	cmd_buf[1] = CONFIG_LENTH; 
@@ -2349,15 +2624,19 @@ static void set_ticket_mask(struct cgpu_info *antrouter)
 	cmd_buf[4] = 0;
 	cmd_buf[5] = 0;
 	cmd_buf[6] = 0;
-	cmd_buf[7] = 0x07;
+	cmd_buf[7] = 0x3f;
 	cmd_buf[8] = 0;
 	cmd_buf[8] = CRC5(cmd_buf, 64);
+	sendlen = CONFIG_LENTH;
+	if(opt_scrypt)
+		sendlen = CONFIG_LENTH + 1;
 
 	antrouter->tm = cmd_buf[7];
 	
 	applog(LOG_NOTICE, "Set ticket mask %02x%02x%02x%02x%02x%02x%02x%02x%02x" ,cmd_buf[0], cmd_buf[1], cmd_buf[2], cmd_buf[3],
 		 cmd_buf[4], cmd_buf[5], cmd_buf[6], cmd_buf[7], cmd_buf[8]);
-	err = antrouter_write(antrouter->device_fd, cmd_buf,CONFIG_LENTH);
+	applog(LOG_NOTICE,"set tm as %02x,hash as %d",antrouter->tm,antrouter->tm+1);
+	err = antrouter_write(antrouter->device_fd, cmd_buf,sendlen);
 	if(err != 0){
 		applog(LOG_ERR,"set TM error");
 		return ;
@@ -2366,6 +2645,36 @@ static void set_ticket_mask(struct cgpu_info *antrouter)
 	cgsleep_ms(5);
 }
 
+void enable_read_temp_by_i2c(struct cgpu_info *antrouter)
+{
+	
+	unsigned char cmd_buf[9];
+	int err;
+	uint8_t addr = 0x100/antrouter->chip_num;
+	cmd_buf[0] = SET_CONFIG | CMD_TYPE;
+	cmd_buf[1] = CONFIG_LENTH;
+	cmd_buf[2] = addr;
+	cmd_buf[3] = MISC_CONTROL;
+	cmd_buf[4] = HASHRATE_CTRL1(0) | HASHRATE_CTRL2(4);
+	cmd_buf[5] = INV_CLKO;
+	if(opt_antrouter_temp_select)
+		cmd_buf[5] |= 0x1;
+	cmd_buf[6] = BT8D | RFS;
+	cmd_buf[7] = MMEN |TFS(3);
+	
+
+	cmd_buf[8] = 0;
+	cmd_buf[8] = CRC5(cmd_buf, 64);
+
+	applog(LOG_NOTICE, "Set misc_ctrl %02x%02x%02x%02x%02x%02x%02x%02x%02x" ,cmd_buf[0], cmd_buf[1], cmd_buf[2], cmd_buf[3],
+					cmd_buf[4], cmd_buf[5], cmd_buf[6], cmd_buf[7],cmd_buf[8]);
+	err = antrouter_write(antrouter->device_fd, cmd_buf, sizeof(cmd_buf));
+	if (err != 0) {
+		applog(LOG_ERR, "%s%i: vil set misc_ctrl Comms error (werr=%d)", antrouter->drv->name, antrouter->device_id, err);
+		return ;
+	}
+	cgsleep_ms(5);
+}
 
 static bool open_core(struct cgpu_info *antrouter)
 {
@@ -2403,18 +2712,7 @@ static bool open_core(struct cgpu_info *antrouter)
 		cmd_buf[6] = GATEBCLK | BT8D;
 		cmd_buf[7] = MMEN;
 		
-/*		cmd_buf[0] = 8;
-		cmd_buf[0] |= (0x02 << 5);//type
-		cmd_buf[0] |= 0x10; //all
 
-		cmd_buf[1] = 0x9; //length
-		cmd_buf[2] = 0;
-		cmd_buf[3] = 0x1c;
-		cmd_buf[4] = 0x40;
-		cmd_buf[5] = 0x20;
-		cmd_buf[6] = 0x9a;			
-		cmd_buf[7] = 0x80;
-*/
 		cmd_buf[8] = 0;
 		cmd_buf[8] = CRC5(cmd_buf, 64);
 
@@ -2467,6 +2765,85 @@ static bool open_core(struct cgpu_info *antrouter)
 
 	return true;
 }
+
+#if 1
+
+int8_t calibration_sensor_offset(struct cgpu_info * antrouter,struct ANTROUTER_INFO * info)
+{
+    uint8_t offset,middle,local,last_offset;
+    unsigned int ret = 0,i = 0;
+	unsigned char result;
+	while(1){
+		result = get_IIC_status(antrouter,info,false);
+		if((result == IIC_BUSY) || (result ==IIC_RW_FAIL)){			
+			cgsleep_ms(10);
+       		continue;
+		}
+		break;
+	}
+	// use extend mode,Temperature values are offset by 64¡ãC in the offset binary data format
+    general_IIC_test(antrouter,info, 0x98, 0x9, 0x4,1);
+	cgsleep_ms(120);
+	general_IIC_test(antrouter,info, 0x98, 0x3, 0,0);
+	cgsleep_ms(120);
+	ret = get_IIC_status(antrouter,info, true);
+	applog(LOG_NOTICE,"get config %02x",ret);
+		
+    general_IIC_test(antrouter,info, 0x98, 0x11, 0xba,1);
+	cgsleep_ms(120);
+	do{
+	    general_IIC_test(antrouter,info, 0x98, 0x0, 0,0);
+		cgsleep_ms(120);
+		ret = get_IIC_status(antrouter,info, true);
+	    local = ret & 0xff;
+		applog(LOG_DEBUG,"get local temp %d",local);
+	    general_IIC_test(antrouter,info, 0x98, 0x1, 0,0);
+		cgsleep_ms(120);
+		ret = get_IIC_status(antrouter,info, true);
+	    middle = ret & 0xff;
+		applog(LOG_DEBUG,"get remote temp %d",middle);
+		if(i == 0)
+	    	offset = -70 + (local - middle);
+		else
+			offset = local - middle + last_offset;
+		last_offset = offset;
+	    ret = general_IIC_test(antrouter,info, 0x98, 0x11, offset,1);
+		applog(LOG_DEBUG,"get offset %d %d times",offset,i);
+		cgsleep_ms(120);
+	}while((i++ < 5) && (abs(local - middle) > 2));
+}
+#else
+
+int8_t calibration_sensor_offset(struct cgpu_info * antrouter,struct ANTROUTER_INFO * info)
+{
+    int8_t offset,middle,local;
+    unsigned int ret = 0,i = 0;
+	unsigned char result;
+	while(1){
+		result = get_IIC_status(antrouter,info,false);
+		if((result == IIC_BUSY) || (result ==IIC_RW_FAIL)){			
+			cgsleep_ms(10);
+       		continue;
+		}
+		break;
+	}
+    general_IIC_test(antrouter,info, 0x98, 0x11, 0xba,1);
+	cgsleep_ms(120);
+
+	    general_IIC_test(antrouter,info, 0x98, 0x0, 0,0);
+		cgsleep_ms(120);
+		ret = get_IIC_status(antrouter,info, true);
+	    local = ret & 0xff;
+	    general_IIC_test(antrouter,info, 0x98, 0x1, 0,0);
+		cgsleep_ms(120);
+		ret = get_IIC_status(antrouter,info, true);
+	    middle = ret & 0xff;
+	    offset = -70 + (local - middle);
+	    ret = general_IIC_test(antrouter,info, 0x98, 0x11, offset,1);
+		cgsleep_ms(120);
+}
+
+#endif
 
 static bool antrouter_detect_one(const char *devpath)
 {
@@ -2542,7 +2919,7 @@ cmr2_retry:
 		if(opt_debug)
 			get_pll(antrouter);
 
-		if(likely(set_chip_addr(antrouter)))
+		if(likely(set_chip_addr(antrouter,info)))
 			ok = true;
 		else
 			continue;
@@ -2552,12 +2929,18 @@ cmr2_retry:
 		}	
 		
 		set_ticket_mask(antrouter);
-		get_ticket_mask(antrouter);
+		if(opt_debug)
+			get_asic_reg(antrouter,1, 0, TICKET_MASK);
+		enable_read_temp_by_i2c(antrouter);
+		get_asic_reg(antrouter, 0, info->addr_interval, MISC_CONTROL);
+
+		calibration_sensor_offset(antrouter,info);
+
 
 		if(!open_core(antrouter))
 			continue;
 		
-
+		enable_read_temp_by_i2c(antrouter);
 
 			
 		if((opt_debug || TEST_MODE) && opt_antrouter_vil == 0){
@@ -2651,6 +3034,10 @@ cmr2_retry:
 	set_timing_mode(this_option_offset, antrouter, readtimeout);
 
 	//pthread_create(&antrouter->hashrate_id,NULL,get_hashrate_func,(void *)antrouter);
+	
+	if(pthread_create(&antrouter->read_temp_id,NULL,get_temp_func,(void *)antrouter))
+		quit(1, "failed to create get temp thr");
+	
 	return true;
 
 unshin:
@@ -2661,6 +3048,181 @@ shin:
 	return false;
 }
 
+
+static bool set_core_cmd(struct cgpu_info *antrouter, unsigned char mode,unsigned char core_mode, unsigned char index,unsigned char cmd_type,unsigned char data)
+{
+	unsigned char cmd_buf[9] = {0};			
+	int err,amount;
+
+	cmd_buf[0] = CMD_TYPE | SET_CONFIG;
+	if(mode)
+		cmd_buf[0] |= CMD_ALL;
+	cmd_buf[1] = CONFIG_LENTH; 
+	cmd_buf[2] = 0;
+	cmd_buf[3] = CORE_CMD_IN;
+	cmd_buf[4] = 0;
+	if(core_mode)
+		cmd_buf[4] = CORE_CMD_ALL;
+	cmd_buf[5] = CORE_INDEX(index);
+	cmd_buf[6] = cmd_type;
+	cmd_buf[7] = CORE_DATA(data);
+	cmd_buf[8] = 0;
+	cmd_buf[8] = CRC5(cmd_buf, 64);
+	applog(LOG_NOTICE, "Set core cmd %02x%02x%02x%02x%02x%02x%02x%02x%02x" ,cmd_buf[0], cmd_buf[1], cmd_buf[2], cmd_buf[3],
+					cmd_buf[4], cmd_buf[5], cmd_buf[6], cmd_buf[7],cmd_buf[8]);
+
+	err = antrouter_write(antrouter->device_fd, cmd_buf, sizeof(cmd_buf));
+	if (err != 0) {
+		applog(LOG_ERR, "%s%i: set core cmd Comms error (werr=%d)", antrouter->drv->name, antrouter->device_id, err);
+		return false;
+	}
+
+	return true;
+}
+
+static bool antrouter_detect_one_scrypt(const char *devpath)
+{
+	int this_option_offset = ++option_offset;
+	struct ANTROUTER_INFO *info;
+	struct timeval tv_start, tv_finish,timeout;
+	unsigned char nonce_bin[ANTROUTER_READ_SIZE];
+	struct ANTROUTER_WORK workdata;
+	char *nonce_hex;
+	int baud = 115200, work_division = 1, fpga_count = 1,frequency = 0,miner_count = 1;
+	float readtimeout = 1.0;
+	struct cgpu_info *antrouter;
+	fd_set readfds;
+	int ret, err, amount, tries, i = 0;
+	bool ok,get_golden_nonce = false;
+
+	char frequency_t[64] = {0};
+	unsigned char cmd_buf[4] = {0};
+	unsigned char rdreg_buf[4] = {0};
+	unsigned char reg_data[4] = {0};
+	unsigned char reg_data_pll[4] = {0};
+	unsigned char reg_data_pll2[4] = {0};
+	unsigned char reg_data_vil[4] = {0};
+	unsigned char rebuf[ANTROUTER_READ_BUF_LEN] = {0};
+	int nodata = 0;
+	char msg[10240] = {0};
+	int k = 0,chip_num;
+
+	if (opt_antrouter_options == NULL)
+		return false;
+	antrouter = com_alloc_cgpu(&antrouter_drv, 1);
+	get_options(this_option_offset, antrouter, &baud, &readtimeout,&frequency, frequency_t,reg_data);
+
+	get_plldata(1485, frequency,reg_data_pll,reg_data_pll2,reg_data_vil);
+	applog(LOG_DEBUG,"reg_data=%02x%02x",reg_data[0],reg_data[1]);
+	antrouter_initialise(antrouter, baud,readtimeout);
+	info = (struct ANTROUTER_INFO *)calloc(1, sizeof(struct ANTROUTER_INFO));
+	if (unlikely(!info))
+		quit(1, "Failed to malloc ANTROUTER_INFO");
+	antrouter->device_data = (void *)info;
+	info->timeout = ANTROUTER_WAIT_TIMEOUT * readtimeout;
+	info->frequency = frequency;
+	strcpy(info->frequency_t, frequency_t);
+
+cmr2_retry:
+	tries = 2;
+	ok = false;
+	while (!ok && tries-- > 0)
+	{
+		int readlen = 0;
+		int totallen = 0;
+	/*	if(!opt_debug)
+			ok = true;
+	*/	
+	
+		if(likely(set_chip_addr(antrouter,info)))
+			ok = true;
+		else{
+			applog(LOG_WARNING,"get chip addr error");
+			continue;
+		}
+		if (frequency != 0) {
+			if(!set_pll(antrouter,reg_data_pll,reg_data_pll2,reg_data_vil))
+				continue;
+		}
+		if(opt_debug)
+			get_pll(antrouter);
+
+
+		if(opt_debug || TEST_MODE){
+			get_chip_addr(antrouter,&chip_num);
+			applog(LOG_NOTICE,"%s,chip num = %d",__FUNCTION__,chip_num);
+		}	
+		
+		set_ticket_mask(antrouter);
+		if(opt_debug)
+			get_asic_reg(antrouter,1, 0, TICKET_MASK);
+		if(!opt_scrypt){
+			enable_read_temp_by_i2c(antrouter);
+			get_asic_reg(antrouter, 0, info->addr_interval, MISC_CONTROL);
+
+			calibration_sensor_offset(antrouter,info);
+			if(!open_core(antrouter))
+				continue;
+
+			enable_read_temp_by_i2c(antrouter);
+		}
+		//open_core
+		if(opt_scrypt){
+			unsigned char  core_index = 0;
+			for(i = 0;i < CORE_NUM_1485;++i){
+				core_index = i;
+				if(i > 5)
+					core_index = i+2;
+				set_core_cmd(antrouter,1,0, core_index, CLOCK_EN_CTRL, 0x1);
+				cgsleep_ms(1);
+			}
+			get_asic_reg(antrouter, 1, 0, CORE_RESP_OUT);
+		}
+		
+	}
+
+	if (!ok) {
+		if (info->intinfo < CAIRNSMORE2_INTS-1) {
+			info->intinfo++;
+			goto cmr2_retry;
+		}
+	} 
+	/* We have a real antrouter! */
+	if (!add_cgpu(antrouter))
+		goto unshin;
+
+	
+	applog(LOG_DEBUG, "%s%d: Init baud=%d work_division=%d fpga_count=%d readtimeout=%f",
+		antrouter->drv->name, antrouter->device_fd, baud, work_division, fpga_count, readtimeout);
+
+	info->baud = baud;
+	info->work_division = work_division;
+	info->fpga_count = fpga_count;
+	info->count = miner_count;
+	info->nonce_mask = mask(work_division);
+	info->work_queue_index = 0;
+	for(k = 0; k < ANTROUTER_WORK_QUEUE_NUM; k++) {
+		info->work_queue[k] = NULL;
+	}
+
+	set_timing_mode(this_option_offset, antrouter, readtimeout);
+
+	//pthread_create(&antrouter->hashrate_id,NULL,get_hashrate_func,(void *)antrouter);
+	if(!opt_scrypt)
+		if(pthread_create(&antrouter->read_temp_id,NULL,get_temp_func,(void *)antrouter))
+			quit(1, "failed to create get temp thr");
+		
+	return true;
+
+unshin:
+	free(info);
+	antrouter->device_data = NULL;
+shin:
+	antrouter = com_free_cgpu(antrouter);
+	return false;
+}
+
+
 void ant_detect(struct device_drv *drv, bool (*device_detect)(const char*))
 {
 	applog(LOG_ERR, "ANT scan devices: checking for %s devices", drv->name);
@@ -2670,11 +3232,17 @@ void ant_detect(struct device_drv *drv, bool (*device_detect)(const char*))
 void antrouter_detect(bool __maybe_unused hotplug)
 {
 	static bool firstrun = true;
-	if(opt_api_port != 4028)
+	if((opt_api_port != 4028) && !opt_scrypt)
 		usb_detect(&antrouter_drv, bmsc_detect_one);
 	else{
 		if(firstrun){
-			ant_detect(&antrouter_drv, antrouter_detect_one);
+			if(opt_scrypt){
+				applog(LOG_NOTICE,"start scrypt detect");
+				ant_detect(&antrouter_drv, antrouter_detect_one_scrypt);
+			}
+			else{
+				ant_detect(&antrouter_drv, antrouter_detect_one);
+			}
 			firstrun = false;
 		}
 	}	
@@ -2748,11 +3316,116 @@ out:
 	}
 }
 
+void *antrouter_fill_work_scrypt(void *userdata)
+{
+	struct thr_info * thr = (struct thr_info *)userdata;
+	struct cgpu_info *antrouter = thr->cgpu;
+	struct ANTROUTER_INFO *info = (struct ANTROUTER_INFO *)(antrouter->device_data);
+	struct timeval send_start, last_send, send_elapsed,last_reg_send,reg_elapsed;
+	struct BMSC_WORK_LTC workdata;
+	struct work *work = NULL;
+	unsigned char workid = 0;
+	int ret,sendlen,i;
+	char *ob_hex;
+	unsigned char workbuf[80];
+
+	while(1){
+
+				
+		cgtime(&send_start);
+		timersub(&send_start, &last_send, &send_elapsed);
+		timersub(&send_start, &last_reg_send, &reg_elapsed);
+		if((send_elapsed.tv_sec*1000 + send_elapsed.tv_usec/1000  >= info->read_time) || first_send || new_job){
+			if(new_job)
+				new_job = false;
+			cgtime(&last_send);
+			if(first_send)
+				tcflush(antrouter->device_fd, TCIOFLUSH);
+get_work:			
+			work = get_work(thr, thr->id);
+			if (unlikely(!work)) {
+				applog(LOG_WARNING,"get work failed");
+				cgsleep_ms(200);
+				goto get_work;
+			}
+			memset((void *)(&workdata), 0, sizeof(workdata));
+			memcpy(workbuf, work->data, 80);
+			rev(workbuf, 80);
+			memcpy(workdata.Sdata,workbuf+4,SCRYPTDATA_SIZE);
+			workdata.type = 0x01<<5;
+			workdata.wc_base = work->id;
+			workdata.length = 1+1+1+1+ SCRYPTDATA_SIZE;
+			sendlen = workdata.length + 2;
+			workdata.crc16 = crc_itu_t(0xffff,(uint8_t *) &workdata, sendlen - 2);
+		
+			memcpy((unsigned char *)&workdata + sendlen - 2,&workdata.crc16,2); 						
+
+			workid = work->id;
+			workid = workid & 0x7F;
+			if(info->work_queue[workid]) {
+				free_work(info->work_queue[workid]);
+				info->work_queue[workid] = NULL;
+			}
+			info->work_queue[workid] = copy_work(work);		
+			
+			pthread_mutex_lock(&write_mutex);
+			ret = antrouter_write(antrouter->device_fd, (unsigned char *)(&workdata), sendlen);
+			pthread_mutex_unlock(&write_mutex);
+			
+			if (ret) {
+				do_antrouter_close(thr);
+				applog(LOG_ERR, "%s: Comms error (werr=%d)", antrouter->device_path, ret);
+				dev_error(antrouter, REASON_DEV_COMMS_ERROR);
+				antrouter_initialise(antrouter,info->baud,info->read_time);
+				goto out;	/* This should never happen */
+			} 
+			
+			first_send = false;
+			check_rate = true;
+		//	hexdump((unsigned char *)&workdata,sendlen);
+		if(opt_debug){
+			char *hex = bin2hex((unsigned char *)(&workdata), sendlen);
+			applog(LOG_NOTICE,"send workdata %s",hex);
+		}
+
+		}
+
+	/*	
+		if(reg_elapsed.tv_sec >= 3 || first_reg_send){
+			get_reg_data(antrouter, 0x80);
+			mutex_lock(&hash_lock);
+			
+			double  ghs = total_mhashes_done / 1000 / total_secs;
+
+			displayed_hash_rate_5s = g_displayed_rolling *(antrouter->tm + 1);
+ 			displayed_hash_rate_avg = ghs*(antrouter->tm + 1);
+			mutex_unlock(&hash_lock);
+
+			
+			
+			uint8_t local = general_IIC_test(antrouter,info,0x98, 0, 0, 0);
+		
+			uint8_t rempte = general_IIC_test(antrouter,info,0x98, 1, 0, 0);
+			cgtime(&last_reg_send);
+			first_reg_send = false;
+		}
+
+		*/
+		
+		cgsleep_ms(1);
+out:
+		if(work != NULL)
+			free_work(work);
+	}
+}
+
 
 void *antrouter_fill(void *userdata)
 {
 	pthread_detach(pthread_self());
-	if(opt_antrouter_vil == 0)
+	if(opt_scrypt)
+		antrouter_fill_work_scrypt(userdata);
+	else if(opt_antrouter_vil == 0)
 		return antrouter_fill_work_fil(userdata);
 	struct thr_info * thr = (struct thr_info *)userdata;
 	struct cgpu_info *antrouter = thr->cgpu;
@@ -2774,10 +3447,11 @@ void *antrouter_fill(void *userdata)
 			cgtime(&last_send);
 			if(first_send)
 				tcflush(antrouter->device_fd, TCIOFLUSH);
-			first_send = false;
 get_work:			
 			work = get_work(thr, thr->id);
 			if (unlikely(!work)) {
+				applog(LOG_WARNING,"get work failed");
+				cgsleep_ms(2000);
 				goto get_work;
 			}
 			memset((void *)(&workdata), 0, sizeof(workdata));
@@ -2816,9 +3490,9 @@ get_work:
 			info->work_queue[workid] = copy_work(work);
 
 			
-		//	pthread_mutex_lock(&write_mutex);
+			pthread_mutex_lock(&write_mutex);
 			ret = antrouter_write(antrouter->device_fd, (unsigned char *)(&workdata), sendlen);
-		//	pthread_mutex_unlock(&write_mutex);
+			pthread_mutex_unlock(&write_mutex);
 			
 			if (ret) {
 				do_antrouter_close(thr);
@@ -2827,19 +3501,16 @@ get_work:
 				antrouter_initialise(antrouter,info->baud,info->read_time);
 				goto out;	/* This should never happen */
 			} 
-			hexdump((unsigned char *)&workdata,sendlen);
-			/*
-			if (opt_debug) {
-				ob_hex = bin2hex((void *)(&workdata), sendlen);
-				applog(LOG_DEBUG, "%s%d: sent %s", antrouter->drv->name, antrouter->device_fd, ob_hex);
-				free(ob_hex);
-			}
-			*/
+			
+			first_send = false;
+			check_rate = true;
+		//	hexdump((unsigned char *)&workdata,sendlen);
+
 		}
 
-		
-		if(reg_elapsed.tv_sec >= 1 || first_reg_send){
-			//get_reg_data(antrouter, 0x80);
+	/*	
+		if(reg_elapsed.tv_sec >= 3 || first_reg_send){
+			get_reg_data(antrouter, 0x80);
 			mutex_lock(&hash_lock);
 			
 			double  ghs = total_mhashes_done / 1000 / total_secs;
@@ -2847,9 +3518,17 @@ get_work:
 			displayed_hash_rate_5s = g_displayed_rolling *(antrouter->tm + 1);
  			displayed_hash_rate_avg = ghs*(antrouter->tm + 1);
 			mutex_unlock(&hash_lock);
+
+			
+			
+			uint8_t local = general_IIC_test(antrouter,info,0x98, 0, 0, 0);
+		
+			uint8_t rempte = general_IIC_test(antrouter,info,0x98, 1, 0, 0);
 			cgtime(&last_reg_send);
 			first_reg_send = false;
 		}
+
+		*/
 		
 		cgsleep_ms(1);
 out:
@@ -2865,7 +3544,8 @@ static bool antrouter_prepare(__maybe_unused struct thr_info *thr)
 	struct ANTROUTER_INFO *info = (struct ANTROUTER_INFO *)(antrouter->device_data);
 
 	info->thr = thr;
-	pthread_create(&antrouter->sendwork_id,NULL,antrouter_fill,(void*)thr);
+	if(pthread_create(&antrouter->sendwork_id,NULL,antrouter_fill,(void*)thr))
+		quit(1, "Failed to create antrouter work_fill thr");
 	return true;
 }
 
@@ -2953,10 +3633,37 @@ static int parse_rxdata_fil(struct cgpu_info *antrouter,unsigned char *rxdata)
 
 }
 
+static int parse_rxdata_scrypt(struct cgpu_info *antrouter,unsigned char *rxdata)
+{
+	struct NONCE_VIL vil_nonce;
+	int k,sig = 0;
+	uint8_t wc,crc5;
+	if (unlikely(!rxdata )) {
+		applog(LOG_ERR, "parse_rxnonce data null error");
+		return -1;
+	}
+	
+	memcpy(&(vil_nonce.crc5), rxdata+6, 1);
+	sig = (vil_nonce.crc5 & 0x80);
+	sig = *(rxdata +6) & 0x80;
+	if(sig == NONCE_RESPOND)
+		return NONCE_RESPOND;
+	crc5 = CRC5(rxdata, 7*8 - 5);	
+	if(crc5 != (vil_nonce.crc5 & 0x1f)){
+		applog(LOG_ERR, "parse_rxdata check crc(%d) != vil crc(%d)", crc5, (vil_nonce.crc5 & 0x1f));
+			return -1;
+	}
+
+	return 0;
+
+}
+
 
 static int parse_rxdata(struct cgpu_info *antrouter,unsigned char *rxdata)
 {
-	if(opt_antrouter_vil == 0)
+	if(opt_scrypt)
+		return parse_rxdata_scrypt(antrouter,rxdata);
+	else if(opt_antrouter_vil == 0)
 		return parse_rxdata_fil(antrouter,rxdata);
 	struct NONCE_VIL vil_nonce;
 	int k,sig = 0;
@@ -3071,7 +3778,7 @@ more_nonces:
 		}
 	}
 	if(ret == NONCE_BIT){
-		memcpy((unsigned char *)&nonce, nonce_bin, sizeof(nonce_bin));
+		memcpy((unsigned char *)&nonce, nonce_bin,4);
 		nonce = htobe32(nonce);
 		curr_hw_errors = antrouter->hw_errors;
 
@@ -3125,9 +3832,158 @@ out:
 	return hash_count;
 }
 
+
+static int64_t antrouter_scanwork_scrypt(struct thr_info *thr)
+{
+	struct cgpu_info *antrouter = thr->cgpu;
+	struct ANTROUTER_INFO *info = (struct ANTROUTER_INFO *)(antrouter->device_data);
+	int ret, err, amount;
+	unsigned char nonce_bin[7];
+	
+	uint32_t nonce;
+	int64_t hash_count = 0;
+	struct timeval tv_start, tv_finish, elapsed;
+	struct timeval tv_history_start, tv_history_finish,tv_now;
+	double Ti, Xi;
+	int curr_hw_errors, i;
+	bool was_hw_error;
+	struct work *worktmp = NULL;
+
+	int64_t count = 0;
+	double Hs;
+	int64_t estimate_hashes;
+    int read_num = 0;
+    uint64_t tmp_rate = 0;
+	unsigned char workid = 0;
+	int submitfull = 0;
+	bool submitnonceok = true;
+	int realllen = 0,nbytes = 0;
+	// Device is gone
+
+	elapsed.tv_sec = elapsed.tv_usec = 0;
+
+	applog(LOG_DEBUG,"%s",__FUNCTION__);
+
+more_nonces:
+	memset(nonce_bin, 0, sizeof(nonce_bin));
+	
+	ret = antrouter_get_nonce(antrouter, nonce_bin, &tv_start, &tv_finish, thr, 50);
+	if (ret == BTM_NONCE_ERROR)
+		goto out;
+
+	// aborted before becoming idle, get new work
+	if (ret == BTM_NONCE_TIMEOUT || ret == BTM_NONCE_RESTART) {
+		timersub(&tv_finish, &tv_start, &elapsed);
+		// ONLY up to just when it aborted
+		// We didn't read a reply so we don't subtract ANTROUTER_READ_TIME
+		estimate_hashes = ((double)(elapsed.tv_sec) + ((double)(elapsed.tv_usec))/((double)1000000)) / info->Hs;
+
+		// If some Serial-USB delay allowed the full nonce range to
+		// complete it can't have done more than a full nonce
+		if (unlikely(estimate_hashes > 0xffffffff))
+			estimate_hashes = 0xffffffff;
+
+		applog(LOG_DEBUG, "%s%d: no nonce = 0x%08lX hashes (%ld.%06lds)", antrouter->drv->name, antrouter->device_fd, (long unsigned int)estimate_hashes, elapsed.tv_sec, elapsed.tv_usec);
+
+		hash_count = 0;
+		goto out;
+	}
+	applog(LOG_NOTICE,"get sth %02x%02x%02x%02x%02x%02x%02x",nonce_bin[0],nonce_bin[1],nonce_bin[2],
+						nonce_bin[3],nonce_bin[4],nonce_bin[5],nonce_bin[6]);
+	ret = parse_rxdata(antrouter,nonce_bin);
+	if(ret == -1){
+		return 0;
+	}
+	if(ret == 0){
+/*		int i;
+		uint64_t temp_hash_rate = 0;
+		uint8_t rate_buf[10];
+	//	uint8_t displayed_rate[16];
+		for(i = 0; i < 4; i++)
+		{
+			sprintf(rate_buf + 2*i,"%02x",nonce_bin[i]);
+		}
+		applog(LOG_DEBUG,"%s: hashrate is %s\n", __FUNCTION__, rate_buf);
+		temp_hash_rate = strtol(rate_buf,NULL,16);
+		temp_hash_rate = (temp_hash_rate << 24);
+		tmp_rate += temp_hash_rate;
+		read_num ++;
+		//if(read_num == antrouter->chip_num){
+		{	rate = tmp_rate;
+			
+			suffix_string_r2(rate, (char * )displayed_hash_rate, sizeof(displayed_hash_rate), 7,true);
+			applog(LOG_NOTICE,"%s:  hashrate is %s\n", __FUNCTION__, displayed_hash_rate);
+			tmp_rate = 0;
+			read_num = 0;
+		}
+
+*/		
+		if(nonce_bin[5] == HASHRATE)
+			calc_hashrate(nonce_bin);
+
+		if(ioctl(antrouter->device_fd, FIONREAD, &nbytes) == 0){
+			applog(LOG_DEBUG,"read buffer %d",nbytes);
+			if(nbytes >= 7)		
+				goto more_nonces;
+		}
+	}
+	if(ret == NONCE_RESPOND){
+		memcpy((unsigned char *)&nonce, nonce_bin, 4);
+		nonce = htobe32(nonce);
+		curr_hw_errors = antrouter->hw_errors;
+
+		workid = nonce_bin[5];
+		workid = workid & 0x7F;
+		worktmp = info->work_queue[workid];
+		
+		if(worktmp) {
+			submitfull = 0;
+			if(submit_nonce_1(thr, worktmp, nonce, &submitfull)) {
+				submitnonceok = true;
+				submit_nonce_2(worktmp);
+			} else {
+				if(submitfull) {
+					submitnonceok = true;
+				} else {
+					submitnonceok = false;
+				}
+			}
+
+			
+			
+		//	submitnonceok = submit_nonce_direct(thr,worktmp,nonce);
+			if(submitnonceok)
+				count += 1;
+			cg_logwork(worktmp, nonce_bin, submitnonceok);
+		} else {
+			applog(LOG_ERR, "%s%d: work %02x not find error", antrouter->drv->name, antrouter->device_fd, workid);
+		}
+
+		was_hw_error = (curr_hw_errors > antrouter->hw_errors);
+
+		if(ioctl(antrouter->device_fd, FIONREAD, &nbytes) == 0){
+			applog(LOG_NOTICE,"read buffer %d",nbytes);
+			if(nbytes >= 7)		
+				goto more_nonces;
+		}
+
+		hash_count = 0x0000ffffULL*count*(antrouter->tm +1);
+
+		if (opt_debug || info->do_antrouter_timing)
+			timersub(&tv_finish, &tv_start, &elapsed);
+
+		applog(LOG_DEBUG, "%s%d: nonce = 0x%08x = 0x%08lX hashes (%ld.%06lds)", antrouter->drv->name, antrouter->device_fd, nonce, (long unsigned int)hash_count, elapsed.tv_sec, elapsed.tv_usec);
+	}
+out:
+	return hash_count;
+}
+
+
 static int64_t antrouter_scanwork(struct thr_info *thr)
 {
-	if(opt_antrouter_vil == 0)
+	if(opt_scrypt)
+		return antrouter_scanwork_scrypt(thr);
+	else if(opt_antrouter_vil == 0)
 		return antrouter_scanwork_fil(thr);
 	struct cgpu_info *antrouter = thr->cgpu;
 	struct ANTROUTER_INFO *info = (struct ANTROUTER_INFO *)(antrouter->device_data);
@@ -3143,20 +3999,21 @@ static int64_t antrouter_scanwork(struct thr_info *thr)
 	bool was_hw_error;
 	struct work *worktmp = NULL;
 
-	int count = 0;
+	int64_t count = 0;
 	double Hs;
 	int64_t estimate_hashes;
     int read_num = 0;
     uint64_t tmp_rate = 0;
 	unsigned char workid = 0;
 	int submitfull = 0;
-	bool submitnonceok = true;
+	bool submitnonceok = false;
 	int realllen = 0,nbytes = 0;
 	// Device is gone
 
 	elapsed.tv_sec = elapsed.tv_usec = 0;
 
 	applog(LOG_DEBUG,"%s",__FUNCTION__);
+
 more_nonces:
 	memset(nonce_bin, 0, sizeof(nonce_bin));
 	
@@ -3189,8 +4046,7 @@ more_nonces:
 		return 0;
 	}
 	if(ret == 0){
-		//pthread_create(&antrouter->reg_id,NULL,calc_hashrate,(void *)nonce_bin);
-		int i;
+/*		int i;
 		uint64_t temp_hash_rate = 0;
 		uint8_t rate_buf[10];
 	//	uint8_t displayed_rate[16];
@@ -3198,26 +4054,40 @@ more_nonces:
 		{
 			sprintf(rate_buf + 2*i,"%02x",nonce_bin[i]);
 		}
-		applog(LOG_ERR,"%s: hashrate is %s\n", __FUNCTION__, rate_buf);
+		applog(LOG_DEBUG,"%s: hashrate is %s\n", __FUNCTION__, rate_buf);
 		temp_hash_rate = strtol(rate_buf,NULL,16);
 		temp_hash_rate = (temp_hash_rate << 24);
 		tmp_rate += temp_hash_rate;
 		read_num ++;
-		if(read_num == antrouter->chip_num){
-			rate = tmp_rate;
+		//if(read_num == antrouter->chip_num){
+		{	rate = tmp_rate;
 			
-			suffix_string_r2(rate, (char * )displayed_hash_rate, sizeof(displayed_hash_rate), 7,false);
-			applog(LOG_DEBUG,"%s:  hashrate is %s\n", __FUNCTION__, displayed_hash_rate);
+			suffix_string_r2(rate, (char * )displayed_hash_rate, sizeof(displayed_hash_rate), 7,true);
+			applog(LOG_NOTICE,"%s:  hashrate is %s\n", __FUNCTION__, displayed_hash_rate);
+			tmp_rate = 0;
+			read_num = 0;
+		}
 
+*/		
+		
+		if(nonce_bin[1] == 0x98 && nonce_bin[2]== 0){
+			info->local_temp = nonce_bin[3];
+			info->local_temp -= 64;
+			applog(LOG_NOTICE,"get local temp %02x",info->local_temp);
+		}
+		if(nonce_bin[1] == 0x98 && nonce_bin[2] == 0x1){
+			info->exte_temp = nonce_bin[3];
+			info->exte_temp -= 64;
+			applog(LOG_NOTICE,"get external temp %02x",info->exte_temp);
 		}
 		if(ioctl(antrouter->device_fd, FIONREAD, &nbytes) == 0){
-			applog(LOG_ERR,"read buffer %d",nbytes);
+			applog(LOG_DEBUG,"read buffer %d",nbytes);
 			if(nbytes >= 7)		
 				goto more_nonces;
 		}
 	}
 	if(ret == NONCE_BIT){
-		memcpy((unsigned char *)&nonce, nonce_bin, sizeof(nonce_bin));
+		memcpy((unsigned char *)&nonce, nonce_bin, 4);
 		nonce = htobe32(nonce);
 		curr_hw_errors = antrouter->hw_errors;
 
@@ -3241,8 +4111,9 @@ more_nonces:
 				} else {
 					submitnonceok = false;
 				}
-			}
-			count++;
+			}		
+			if(submitnonceok)
+				count += 1;
 			cg_logwork(worktmp, nonce_bin, submitnonceok);
 		} else {
 			applog(LOG_ERR, "%s%d: work %02x not find error", antrouter->drv->name, antrouter->device_fd, workid);
@@ -3259,14 +4130,13 @@ more_nonces:
 		hash_count++;
 		hash_count *= info->fpga_count;
 
-	//	hash_count = 0xffffffff*count*antrouter->tm;
-		hash_count = 0xffffffff*count;
+		hash_count = 0xffffffffULL*count*(antrouter->tm +1);
+		//hash_count = 0xffffffffULL*count;
 
 		if (opt_debug || info->do_antrouter_timing)
 			timersub(&tv_finish, &tv_start, &elapsed);
 
 		applog(LOG_DEBUG, "%s%d: nonce = 0x%08x = 0x%08lX hashes (%ld.%06lds)", antrouter->drv->name, antrouter->device_fd, nonce, (long unsigned int)hash_count, elapsed.tv_sec, elapsed.tv_usec);
-
 	}
 out:
 	return hash_count;
@@ -3281,6 +4151,8 @@ static struct api_data *antrouter_api_stats(struct cgpu_info *cgpu)
 	// care since hashing performance is way more important than
 	// locking access to displaying API debug 'stats'
 	// If locking becomes an issue for any of them, use copy_data=true also
+	root = api_add_uint8(root,"local temp", &(info->local_temp), false);
+	root = api_add_uint8(root,"external temp", &(info->exte_temp), false);
 	root = api_add_int(root, "read_time", &(info->read_time), false);
 	root = api_add_int(root, "read_time_limit", &(info->read_time_limit), false);
 	root = api_add_double(root, "fullnonce", &(info->fullnonce), false);
@@ -3366,6 +4238,12 @@ static char *antrouter_set(struct cgpu_info *cgpu, char *option, char *setting, 
 	return replybuf;
 }
 
+static void antrouter_update(struct cgpu_info *antrouter)
+{
+	new_job = true;
+}
+
+
 struct device_drv antrouter_drv = {
 	.drv_id = DRIVER_antrouter,
 	.dname = "antrouter",
@@ -3374,7 +4252,8 @@ struct device_drv antrouter_drv = {
 	.hash_work = &hash_driver_work,
 	.get_api_stats = antrouter_api_stats,
 	.get_statline_before = antrouter_statline_before,
-	.set_device = antrouter_set,
+	//.set_device = antrouter_set,	
+    .update_work = antrouter_update,
 	.identify_device = antrouter_identify,
 	.thread_prepare = antrouter_prepare,
 	.scanwork = antrouter_scanwork,

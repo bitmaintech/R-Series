@@ -369,6 +369,7 @@ struct device_drv {
 
 	/* Highest target diff the device supports */
 	double max_diff;
+	double working_diff;
 
 	/* Lowest diff the controller can safely run at */
 	double min_diff;
@@ -466,7 +467,7 @@ struct cgpu_info {
 	int device_fd;
 	int chip_num;
 	unsigned char tm;
-	pthread_t reg_id,hashrate_id,sendwork_id;
+	pthread_t reg_id,hashrate_id,sendwork_id,read_temp_id;
 #endif
 #ifdef USE_BITMAIN
 	int device_fd;
@@ -615,6 +616,7 @@ static inline void string_elist_del(struct string_elist *item)
 	list_del(&item->list);
 }
 
+extern bool opt_scrypt;
 
 static inline uint32_t swab32(uint32_t v)
 {
@@ -1086,6 +1088,7 @@ extern bool opt_bmsc_rdworktest;
 #ifdef USE_ANTROUTER
 extern char *opt_antrouter_options;
 extern char *opt_antrouter_volt;
+extern bool opt_antrouter_temp_select;
 extern uint8_t multi_mid_nu;
 extern char displayed_hash_rate[16];
 extern double displayed_hash_rate_5s;
@@ -1473,6 +1476,8 @@ struct work {
 	unsigned char	midstate1[32];
 	unsigned char	midstate2[32];	
 	unsigned char	midstate3[32];
+	
+	unsigned char	device_target[32];
 };
 
 #ifdef USE_MODMINER 

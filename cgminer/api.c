@@ -2670,17 +2670,22 @@ static void summary(struct io_data *io_data, __maybe_unused SOCKETTYPE c, __mayb
 	mutex_lock(&hash_lock);
 
 	utility = total_accepted / ( total_secs ? total_secs : 1 ) * 60;
-	ghs = total_mhashes_done / 1000 / total_secs;
+	//ghs = total_mhashes_done / 1000 / total_secs;
+	ghs = total_mhashes_done / total_secs;
 	work_utility = total_diff1 / ( total_secs ? total_secs : 1 ) * 60;
 
 	root = api_add_elapsed(root, "Elapsed", &(total_secs), true);	
-	if(opt_antrouter_vil){
+/*	if(opt_antrouter_vil){
 		root = api_add_mhs(root, "GHS 5s", &(displayed_hash_rate_5s), false);
 		root = api_add_mhs(root, "GHS av", &(displayed_hash_rate_avg), false);
 	}else{
 		root = api_add_mhs(root, "GHS 5s", &(g_displayed_rolling), false);
 		root = api_add_mhs(root, "GHS av", &(ghs), false);
 	}
+
+	*/
+	root = api_add_mhs(root, "GHS 5s", &(g_displayed_rolling), false);
+	root = api_add_mhs(root, "GHS av", &(ghs), false);
 	root = api_add_uint(root, "Found Blocks", &(found_blocks), true);
 	root = api_add_int64(root, "Getworks", &(total_getworks), true);
 	root = api_add_int64(root, "Accepted", &(total_accepted), true);
@@ -3375,14 +3380,6 @@ static int itemstats(struct io_data *io_data, int i, char *id, struct cgminer_st
 		root = api_add_string(root, "GHS av", displayed_hashes, false);
 
 	
-	/*cg_wprintw(statuswin, "%6s / %6sh/s WU:%*.1f/m "
-			"A:%*.0f R:%*.0f HW:%*d",
-			displayed_rolling,
-			displayed_hashes, wuwidth + 2, wu,
-			dawidth, cgpu->diff_accepted,
-			drwidth, cgpu->diff_rejected,
-			hwwidth, cgpu->hw_errors);
-	*/
 #endif
 	/*
 	if (pool_stats) {
